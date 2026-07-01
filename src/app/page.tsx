@@ -299,9 +299,6 @@ export default function Dashboard() {
       setStreamingContent('')
       setIsStreaming(false)
 
-      // Fetch the updated messages list from Supabase in the background to sync real database IDs
-      await fetchMessages(currentSessionId!)
-
     } catch (err: any) {
       console.error('Failed to complete message cycle:', err)
       // Append a system error message in the chat
@@ -433,7 +430,7 @@ export default function Dashboard() {
       </aside>
 
       {/* 2. MAIN CHAT AREA */}
-      <section className="flex-1 h-full flex flex-col bg-slate-950 relative min-w-0">
+      <section className="flex-1 h-screen max-h-screen flex flex-col overflow-hidden bg-slate-950 relative min-w-0">
         {/* Decorative background glows */}
         <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-violet-600/5 blur-[100px] pointer-events-none" />
         <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-cyan-600/5 blur-[100px] pointer-events-none" />
