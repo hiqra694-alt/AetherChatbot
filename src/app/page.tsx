@@ -39,9 +39,10 @@ interface Message {
 }
 
 const PROVIDERS = [
-  { id: 'gemini', name: 'Google Gemini', icon: Flame, color: 'text-violet-400 bg-violet-950/50 border-violet-800/50 hover:bg-violet-950/80', accentColor: 'violet' },
-  { id: 'openai', name: 'OpenAI ChatGPT', icon: Zap, color: 'text-emerald-400 bg-emerald-950/50 border-emerald-800/50 hover:bg-emerald-950/80', accentColor: 'emerald' },
-  { id: 'claude', name: 'Anthropic Claude', icon: Brain, color: 'text-amber-400 bg-amber-950/50 border-amber-800/50 hover:bg-amber-950/80', accentColor: 'amber' }
+  { id: 'gemini', name: 'Google Gemini', icon: Flame, color: 'text-violet-600 bg-violet-50 border-violet-200 hover:bg-violet-100', accentColor: 'violet' },
+  { id: 'openai', name: 'OpenAI ChatGPT', icon: Zap, color: 'text-emerald-600 bg-emerald-50 border-emerald-200 hover:bg-emerald-100', accentColor: 'emerald' },
+  { id: 'claude', name: 'Anthropic Claude', icon: Brain, color: 'text-amber-600 bg-amber-50 border-amber-200 hover:bg-amber-100', accentColor: 'amber' },
+  { id: 'mock', name: 'Mock AI Provider', icon: Bot, color: 'text-slate-600 bg-slate-50 border-slate-200 hover:bg-slate-100', accentColor: 'slate' }
 ]
 
 export default function Dashboard() {
@@ -139,7 +140,6 @@ export default function Dashboard() {
     setStreamingContent('')
     setIsStreaming(false)
     await fetchMessages(sessionId)
-    // Close sidebar on mobile when session is selected
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
     }
@@ -151,6 +151,7 @@ export default function Dashboard() {
     setStreamingContent('')
     setIsStreaming(false)
     setInputText('')
+    setProviderDropdownOpen(false)  // always close any open dropdown
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
     }
@@ -233,14 +234,18 @@ export default function Dashboard() {
         setMessages(prev => [...prev, userMsg])
       }
 
-      // 3. Trigger Mock Streaming from API
+      // 3. Trigger Streaming from Backend Proxy (using Supabase Auth JWT header)
       setIsStreaming(true)
       setStreamingContent('')
+
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token || ''
 
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
           provider: selectedProvider,
@@ -249,8 +254,15 @@ export default function Dashboard() {
       })
 
       if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Failed to initialize streaming response.')
+        // Safely parse error — backend may return plain text (e.g. "Internal Server Error")
+        let errDetail = `HTTP ${response.status}: Request failed.`
+        try {
+          const errorData = await response.json()
+          errDetail = errorData.detail || errorData.error || errDetail
+        } catch {
+          try { errDetail = await response.text() } catch { /* ignore */ }
+        }
+        throw new Error(errDetail)
       }
 
       const reader = response.body?.getReader()
@@ -258,6 +270,7 @@ export default function Dashboard() {
       if (!reader) throw new Error('No stream reader available.')
 
       let streamedText = ''
+      let streamError: string | null = null
 
       while (true) {
         const { value, done } = await reader.read()
@@ -269,25 +282,33 @@ export default function Dashboard() {
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const dataStr = line.slice(6).trim()
-            if (dataStr === '[DONE]') {
-              break
-            }
+            if (dataStr === '[DONE]') break
             try {
               const parsed = JSON.parse(dataStr)
               if (parsed.content) {
                 streamedText += parsed.content
                 setStreamingContent(streamedText)
+              } else if (parsed.error) {
+                // Backend sent an error event (quota, model not found, etc.)
+                streamError = parsed.error
               }
-            } catch (err) {
-              // Partial JSON or stream packet fragment, safe to ignore
+            } catch {
+              // Partial JSON fragment — safe to ignore
             }
           }
         }
+
+        // Stop reading as soon as an error was signaled
+        if (streamError) break
+      }
+
+      if (streamError) {
+        throw new Error(streamError)
       }
 
       // 4. Once streaming is complete, append the assistant response to messages state
       const mockAssistantMsg: Message = {
-        id: Math.random().toString(), // local temporary ID
+        id: Math.random().toString(),
         session_id: currentSessionId!,
         role: 'assistant',
         content: streamedText,
@@ -301,12 +322,19 @@ export default function Dashboard() {
 
     } catch (err: any) {
       console.error('Failed to complete message cycle:', err)
-      // Append a system error message in the chat
+      // Extract clean user-facing message from verbose API error responses
+      let errMsg: string = err.message || 'Unable to get a response. Please try again.'
+      // Trim long API error strings to just the first meaningful sentence
+      const msgMatch = errMsg.match(/'message':\s*'([^']+)'/)
+      if (msgMatch) errMsg = msgMatch[1]
+      // Cap length
+      if (errMsg.length > 200) errMsg = errMsg.slice(0, 200) + '...'
+
       const errorMsg: Message = {
         id: Math.random().toString(),
         session_id: currentSessionId || '',
         role: 'assistant',
-        content: `⚠️ Error: ${err.message || 'Unable to get response from mock AI service. Please check database configuration.'}`,
+        content: `⚠️ ${errMsg}`,
         provider_used: selectedProvider,
         created_at: new Date().toISOString()
       }
@@ -325,27 +353,27 @@ export default function Dashboard() {
   const ActiveProviderIcon = activeProvider.icon
 
   return (
-    <main className="flex h-screen w-screen bg-slate-950 text-slate-100 overflow-hidden font-sans">
+    <main className="flex h-screen w-screen bg-slate-50 text-slate-800 overflow-hidden font-sans">
       {/* 1. SIDEBAR PANEL */}
       <aside
-        className={`fixed md:relative z-20 h-full w-[280px] bg-slate-900 border-r border-slate-800 flex flex-col transition-all duration-300 ${
+        className={`fixed md:relative z-20 h-full w-[280px] bg-slate-100/90 border-r border-slate-200/80 flex flex-col transition-all duration-300 ${
           sidebarOpen ? 'left-0' : '-left-[280px] md:-ml-[280px]'
         }`}
       >
         {/* Sidebar Header */}
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 bg-gradient-to-tr from-violet-600 to-cyan-500 rounded-lg flex items-center justify-center shadow-md">
               <Bot className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="font-bold text-base tracking-tight text-white">AetherChat</h2>
-              <span className="text-[10px] text-cyan-400 font-semibold uppercase tracking-wider">Multi-AI Portal</span>
+              <h2 className="font-bold text-base tracking-tight text-slate-800">AetherChat</h2>
+              <span className="text-[10px] text-violet-600 font-bold uppercase tracking-wider">Multi-AI Portal</span>
             </div>
           </div>
           <button
             onClick={() => setSidebarOpen(false)}
-            className="md:hidden p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white"
+            className="md:hidden p-1.5 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-slate-800"
           >
             <X className="w-5 h-5" />
           </button>
@@ -355,7 +383,7 @@ export default function Dashboard() {
         <div className="p-3">
           <button
             onClick={handleNewChat}
-            className="w-full py-2.5 px-4 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white font-medium rounded-xl transition-all shadow-md shadow-violet-500/5 hover:shadow-violet-500/10 active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
+            className="w-full py-2.5 px-4 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white font-semibold rounded-xl transition-all shadow-md active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             New Chat Thread
@@ -364,18 +392,18 @@ export default function Dashboard() {
 
         {/* Sessions History List */}
         <div className="flex-1 overflow-y-auto px-2 space-y-1 py-2 custom-scrollbar">
-          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider px-3 mb-2">
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 mb-2">
             Recent Dialogues
           </div>
           
           {loadingSessions ? (
             <div className="flex flex-col gap-2 p-3">
-              <div className="h-8 bg-slate-800/50 rounded-lg animate-pulse" />
-              <div className="h-8 bg-slate-800/50 rounded-lg animate-pulse" />
-              <div className="h-8 bg-slate-800/50 rounded-lg animate-pulse" />
+              <div className="h-8 bg-slate-200/50 rounded-lg animate-pulse" />
+              <div className="h-8 bg-slate-200/50 rounded-lg animate-pulse" />
+              <div className="h-8 bg-slate-200/50 rounded-lg animate-pulse" />
             </div>
           ) : sessions.length === 0 ? (
-            <div className="text-center py-8 px-4 text-xs text-slate-500">
+            <div className="text-center py-8 px-4 text-xs text-slate-400">
               No chat history yet. Send a message to start!
             </div>
           ) : (
@@ -385,19 +413,19 @@ export default function Dashboard() {
                 onClick={() => handleSelectSession(session.id)}
                 className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border ${
                   activeSessionId === session.id
-                    ? 'bg-slate-800/80 border-slate-700 text-white shadow-inner'
-                    : 'bg-transparent border-transparent hover:bg-slate-800/30 text-slate-400 hover:text-slate-200'
+                    ? 'bg-white border-slate-200 text-slate-950 shadow-sm font-semibold'
+                    : 'bg-transparent border-transparent hover:bg-slate-200/40 text-slate-500 hover:text-slate-800'
                 }`}
               >
                 <div className="flex items-center gap-2.5 overflow-hidden w-[80%]">
                   <MessageSquare className={`w-4.5 h-4.5 flex-shrink-0 ${
-                    activeSessionId === session.id ? 'text-cyan-400' : 'text-slate-500'
+                    activeSessionId === session.id ? 'text-violet-500' : 'text-slate-400'
                   }`} />
-                  <span className="text-sm truncate font-medium">{session.title}</span>
+                  <span className="text-sm truncate">{session.title}</span>
                 </div>
                 <button
                   onClick={(e) => handleDeleteSession(e, session.id)}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-700/80 rounded text-slate-500 hover:text-rose-400 transition-all cursor-pointer"
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-200/80 rounded text-slate-400 hover:text-rose-500 transition-all cursor-pointer"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -408,20 +436,20 @@ export default function Dashboard() {
 
         {/* User Card & Logout */}
         {user && (
-          <div className="p-4 border-t border-slate-800 bg-slate-900/60 flex items-center justify-between gap-3">
+          <div className="p-4 border-t border-slate-200 bg-slate-100/50 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 overflow-hidden">
-              <div className="w-8 h-8 rounded-full bg-violet-600/20 border border-violet-500/30 flex items-center justify-center text-violet-400 font-bold uppercase flex-shrink-0 text-sm">
+              <div className="w-8 h-8 rounded-full bg-violet-600/10 border border-violet-500/20 flex items-center justify-center text-violet-600 font-bold uppercase flex-shrink-0 text-sm">
                 {user.email?.charAt(0) || 'U'}
               </div>
               <div className="flex flex-col overflow-hidden">
-                <span className="text-xs font-semibold text-slate-200 truncate">{user.email}</span>
-                <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">Standard Account</span>
+                <span className="text-xs font-semibold text-slate-850 truncate">{user.email}</span>
+                <span className="text-[9px] text-slate-400 uppercase tracking-wider font-bold">Standard Account</span>
               </div>
             </div>
             <button
               onClick={handleLogout}
               title="Sign Out"
-              className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
+              className="p-2 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-rose-500 transition-colors cursor-pointer"
             >
               <LogOut className="w-4.5 h-4.5" />
             </button>
@@ -429,37 +457,38 @@ export default function Dashboard() {
         )}
       </aside>
 
-      {/* 2. MAIN CHAT AREA */}
-      <section className="flex-1 h-screen max-h-screen flex flex-col overflow-hidden bg-slate-950 relative min-w-0">
+      {/* 2. MAIN CHAT AREA — keyed by session ID so React fully remounts on every session change */}
+      <section key={activeSessionId ?? 'new-chat'} className="flex-1 h-screen max-h-screen flex flex-col overflow-hidden bg-slate-50/50 relative min-w-0">
         {/* Decorative background glows */}
-        <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-violet-600/5 blur-[100px] pointer-events-none" />
-        <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-cyan-600/5 blur-[100px] pointer-events-none" />
+        <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-violet-500/5 blur-[100px] pointer-events-none" />
+        <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-cyan-500/5 blur-[100px] pointer-events-none" />
 
         {/* Top Navigation Bar */}
-        <header className="h-16 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-md flex items-center justify-between px-4 z-10">
-          <div className="flex items-center gap-3">
+        <header className="h-16 border-b border-slate-200/80 bg-white/80 backdrop-blur-md flex items-center justify-between px-4 z-10">
+          {/* Left side: menu toggle + thread title — flex-1 min-w-0 lets it shrink without clipping right side */}
+          <div className="flex items-center gap-3 flex-1 min-w-0">
             {!sidebarOpen && (
               <button
                 onClick={() => setSidebarOpen(true)}
-                className="p-2 hover:bg-slate-900 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer"
+                className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
               >
                 <Menu className="w-5 h-5" />
               </button>
             )}
             
             {/* Active Thread Details */}
-            <div className="hidden sm:flex flex-col">
-              <h3 className="text-sm font-bold text-white truncate max-w-[200px] md:max-w-[400px]">
+            <div className="hidden sm:flex flex-col min-w-0">
+              <h3 className="text-sm font-bold text-slate-800 truncate max-w-[200px] md:max-w-[400px]">
                 {activeSessionId ? sessions.find(s => s.id === activeSessionId)?.title : 'New Workspace'}
               </h3>
-              <span className="text-[10px] text-slate-500 font-medium">
+              <span className="text-[10px] text-slate-400 font-medium">
                 {activeSessionId ? 'Saved to Cloud Database' : 'Drafting message...'}
               </span>
             </div>
           </div>
 
-          {/* Model Selector Dropdown */}
-          <div className="relative">
+          {/* Model Selector Dropdown - flex-shrink-0 prevents it from being squeezed off screen */}
+          <div className="relative flex-shrink-0">
             <button
               onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
               className={`flex items-center gap-2.5 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
@@ -471,14 +500,13 @@ export default function Dashboard() {
 
             {providerDropdownOpen && (
               <>
-                {/* Backdrop overlay to close dropdown */}
                 <div
                   className="fixed inset-0 z-20 cursor-default"
                   onClick={() => setProviderDropdownOpen(false)}
                 />
                 
-                <div className="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-800 rounded-xl shadow-xl z-30 p-1.5 animate-fade-in">
-                  <div className="text-[9px] font-bold text-slate-500 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-800 mb-1">
+                <div className="absolute right-0 mt-2 w-56 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
+                  <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 mb-1">
                     Select Brain Engine
                   </div>
                   {PROVIDERS.map(p => {
@@ -493,17 +521,17 @@ export default function Dashboard() {
                         }}
                         className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${
                           isSelected
-                            ? 'bg-slate-800/80 text-white font-bold'
-                            : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/30'
+                            ? 'bg-slate-100 text-slate-900 font-bold'
+                            : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
                         }`}
                       >
                         <div className="flex items-center gap-2.5">
                           <Icon className={`w-4 h-4 ${
-                            p.id === 'gemini' ? 'text-violet-400' : p.id === 'openai' ? 'text-emerald-400' : 'text-amber-400'
+                            p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : 'text-slate-500'
                           }`} />
                           <span>{p.name}</span>
                         </div>
-                        {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />}
+                        {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
                       </button>
                     )
                   })}
@@ -527,10 +555,10 @@ export default function Dashboard() {
                 <Bot className="w-10 h-10 text-white" />
               </div>
               <div>
-                <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-100 to-slate-400">
+                <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-slate-900 via-slate-700 to-slate-500">
                   Welcome to AetherChat
                 </h1>
-                <p className="text-sm text-slate-400 mt-2.5 max-w-md mx-auto leading-relaxed">
+                <p className="text-sm text-slate-500 mt-2.5 max-w-md mx-auto leading-relaxed font-medium">
                   Connect securely, switch between LLM providers on the fly, and experience real-time responses.
                 </p>
               </div>
@@ -539,17 +567,17 @@ export default function Dashboard() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full mt-4">
                 <button
                   onClick={() => handleQuickPrompt("Write a clean, documented Python function to calculate Fibonacci sequences.")}
-                  className="p-4 bg-slate-900/40 hover:bg-slate-900/80 border border-slate-800/80 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-violet-500/30 group cursor-pointer"
+                  className="p-4 bg-white hover:bg-slate-50 border border-slate-205 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-violet-500/30 group cursor-pointer shadow-sm"
                 >
-                  <span className="block text-xs font-bold text-slate-300 group-hover:text-white">Write Python Code</span>
-                  <span className="block text-[11px] text-slate-500 mt-1">Generate a documented Fibonacci algorithm.</span>
+                  <span className="block text-xs font-bold text-slate-700 group-hover:text-slate-900">Write Python Code</span>
+                  <span className="block text-[11px] text-slate-400 mt-1">Generate a documented Fibonacci algorithm.</span>
                 </button>
                 <button
                   onClick={() => handleQuickPrompt("Explain quantum physics principles in three simple bullet points.")}
-                  className="p-4 bg-slate-900/40 hover:bg-slate-900/80 border border-slate-800/80 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-cyan-500/30 group cursor-pointer"
+                  className="p-4 bg-white hover:bg-slate-50 border border-slate-205 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-cyan-500/30 group cursor-pointer shadow-sm"
                 >
-                  <span className="block text-xs font-bold text-slate-300 group-hover:text-white">Explain Physics Concepts</span>
-                  <span className="block text-[11px] text-slate-500 mt-1">Summarize quantum principles cleanly.</span>
+                  <span className="block text-xs font-bold text-slate-700 group-hover:text-slate-900">Explain Physics Concepts</span>
+                  <span className="block text-[11px] text-slate-400 mt-1">Summarize quantum principles cleanly.</span>
                 </button>
               </div>
             </div>
@@ -570,16 +598,16 @@ export default function Dashboard() {
                     <div
                       className={`relative flex flex-col p-4 rounded-2xl border transition-all ${
                         isUser
-                          ? 'bg-violet-600/10 border-violet-500/20 text-slate-200 max-w-[85%] sm:max-w-[75%]'
-                          : 'bg-slate-900/50 border-slate-800/80 text-slate-300 max-w-[85%] sm:max-w-[75%] shadow-md'
+                          ? 'bg-violet-50 border-violet-100 text-slate-800 max-w-[85%] sm:max-w-[75%]'
+                          : 'bg-white border-slate-200/80 text-slate-800 max-w-[85%] sm:max-w-[75%] shadow-sm'
                       }`}
                     >
                       {/* Message Meta Header */}
-                      <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                      <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                         <MsgIcon className="w-3.5 h-3.5" />
                         <span>{isUser ? 'User Message' : 'AI Assistant'}</span>
                         {!isUser && providerObj && (
-                          <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400">
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-650">
                             {providerObj.name}
                           </span>
                         )}
@@ -590,19 +618,15 @@ export default function Dashboard() {
                         {message.content}
                       </p>
 
-                      {/* Floating utilities (e.g. Copy button) */}
-                      <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity">
-                        {/* Wait, the container needs 'group' class to trigger this. Let's make sure it does. */}
-                      </div>
-                      <div className="flex justify-end mt-2 pt-1 border-t border-slate-800/40">
+                      <div className="flex justify-end mt-2 pt-1 border-t border-slate-100">
                         <button
                           onClick={() => handleCopyText(message.content, message.id)}
-                          className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 font-semibold transition-colors cursor-pointer"
+                          className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-slate-600 font-semibold transition-colors cursor-pointer"
                         >
                           {copiedId === message.id ? (
                             <>
-                              <Check className="w-3 h-3 text-emerald-400" />
-                              <span className="text-emerald-400">Copied</span>
+                              <Check className="w-3 h-3 text-emerald-600" />
+                              <span className="text-emerald-600">Copied</span>
                             </>
                           ) : (
                             <>
@@ -620,18 +644,18 @@ export default function Dashboard() {
               {/* Real-time Streaming Response Rendering */}
               {isStreaming && streamingContent && (
                 <div className="flex gap-4 justify-start animate-fade-in">
-                  <div className="flex flex-col p-4 rounded-2xl border bg-slate-900/50 border-slate-800/80 text-slate-300 max-w-[85%] sm:max-w-[75%] shadow-md">
-                    <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                  <div className="flex flex-col p-4 rounded-2xl border bg-white border-slate-200/80 text-slate-800 max-w-[85%] sm:max-w-[75%] shadow-sm">
+                    <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                       <Bot className="w-3.5 h-3.5" />
                       <span>AI Assistant</span>
-                      <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-violet-400 animate-pulse">
+                      <span className="px-1.5 py-0.5 rounded bg-violet-50 border border-violet-100 text-violet-600 animate-pulse">
                         {activeProvider.name} (streaming)
                       </span>
                     </div>
 
                     <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                       {streamingContent}
-                      <span className="inline-block w-1.5 h-4 ml-1 bg-violet-400 animate-pulse align-middle" />
+                      <span className="inline-block w-1.5 h-4 ml-1 bg-violet-500 animate-pulse align-middle" />
                     </p>
                   </div>
                 </div>
@@ -640,8 +664,8 @@ export default function Dashboard() {
               {/* Pulsing loader when waiting for API route response */}
               {isStreaming && !streamingContent && (
                 <div className="flex gap-4 justify-start animate-fade-in">
-                  <div className="flex flex-col p-4 rounded-2xl border bg-slate-900/50 border-slate-800/80 text-slate-400 w-44 shadow-md">
-                    <div className="flex items-center gap-2 mb-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                  <div className="flex flex-col p-4 rounded-2xl border bg-white border-slate-200 text-slate-400 w-44 shadow-sm">
+                    <div className="flex items-center gap-2 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                       <Bot className="w-3.5 h-3.5" />
                       <span>Thinking...</span>
                     </div>
@@ -661,9 +685,9 @@ export default function Dashboard() {
         </div>
 
         {/* Input Text Form Area */}
-        <footer className="p-4 bg-gradient-to-t from-slate-950 via-slate-950 to-transparent border-t border-slate-900 relative z-10">
+        <footer className="p-4 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent border-t border-slate-200/60 relative z-10">
           <div className="max-w-3xl mx-auto">
-            <form onSubmit={handleSendMessage} className="relative flex items-end gap-2 bg-slate-900/80 backdrop-blur-md border border-slate-850 focus-within:border-slate-700/80 rounded-2xl p-2 transition-all">
+            <form onSubmit={handleSendMessage} className="relative flex items-end gap-2 bg-white border border-slate-200/80 focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-500/5 rounded-2xl p-2 transition-all shadow-sm">
               <textarea
                 ref={textareaRef}
                 rows={1}
@@ -677,18 +701,18 @@ export default function Dashboard() {
                 }}
                 disabled={isStreaming}
                 placeholder={isStreaming ? "Awaiting assistant response..." : `Message ${activeProvider.name}...`}
-                className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-100 placeholder-slate-500 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
+                className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 placeholder-slate-400 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
               />
               <button
                 type="submit"
                 disabled={!inputText.trim() || isStreaming}
-                className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-800 disabled:to-slate-800 text-white rounded-xl transition-all shadow-md cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
+                className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 disabled:to-slate-200 text-white rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
               >
                 <Send className="w-4 h-4" />
               </button>
             </form>
-            <p className="text-[10px] text-center text-slate-600 mt-2.5">
-              Secure Postgres chat storage. Mock responses stream at 50ms intervals.
+            <p className="text-[10px] text-center text-slate-400 mt-2.5 font-medium">
+              Secure Postgres chat storage. Streaming powered by FastAPI backend.
             </p>
           </div>
         </footer>
