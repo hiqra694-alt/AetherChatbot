@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/chat",
-        destination: "http://127.0.0.1:8000/api/chat",
+        destination: `${process.env.BACKEND_API_URL || "http://127.0.0.1:8000"}/api/chat`,
       },
     ];
   },
