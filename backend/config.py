@@ -1,4 +1,5 @@
 import os
+from pydantic import Field, AliasChoices # pyright: ignore [reportMissingImports]
 from pydantic_settings import BaseSettings # pyright: ignore [reportMissingImports]
 from dotenv import load_dotenv # pyright: ignore [reportMissingImports]
 
@@ -10,11 +11,11 @@ env_path = os.path.join(config_dir, ".env")
 load_dotenv(dotenv_path=env_path)
 
 class Settings(BaseSettings):
-    gemini_api_key: str = ""
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
-    supabase_url: str = ""
-    supabase_anon_key: str = ""
+    gemini_api_key: str = Field("", validation_alias=AliasChoices("gemini_api_key", "GEMINI_API_KEY"))
+    openai_api_key: str = Field("", validation_alias=AliasChoices("openai_api_key", "OPENAI_API_KEY"))
+    anthropic_api_key: str = Field("", validation_alias=AliasChoices("anthropic_api_key", "ANTHROPIC_API_KEY"))
+    supabase_url: str = Field("", validation_alias=AliasChoices("supabase_url", "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"))
+    supabase_anon_key: str = Field("", validation_alias=AliasChoices("supabase_anon_key", "SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY"))
 
     class Config:
         env_file = env_path
