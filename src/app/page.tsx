@@ -54,7 +54,7 @@ export default function Dashboard() {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  
+
   // UI states
   const [inputText, setInputText] = useState('')
   const [selectedProvider, setSelectedProvider] = useState('gemini')
@@ -278,7 +278,7 @@ export default function Dashboard() {
 
         const chunk = decoder.decode(value, { stream: true })
         const lines = chunk.split('\n')
-        
+
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const dataStr = line.slice(6).trim()
@@ -356,9 +356,8 @@ export default function Dashboard() {
     <main className="flex h-screen w-screen bg-slate-50 text-slate-800 overflow-hidden font-sans">
       {/* 1. SIDEBAR PANEL */}
       <aside
-        className={`fixed md:relative z-20 h-full w-[280px] bg-slate-100/90 border-r border-slate-200/80 flex flex-col transition-all duration-300 ${
-          sidebarOpen ? 'left-0' : '-left-[280px] md:-ml-[280px]'
-        }`}
+        className={`fixed md:relative z-20 h-full w-[280px] bg-slate-100/90 border-r border-slate-200/80 flex flex-col transition-all duration-300 ${sidebarOpen ? 'left-0' : '-left-[280px] md:-ml-[280px]'
+          }`}
       >
         {/* Sidebar Header */}
         <div className="p-4 border-b border-slate-200 flex items-center justify-between">
@@ -395,7 +394,7 @@ export default function Dashboard() {
           <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 mb-2">
             Recent Dialogues
           </div>
-          
+
           {loadingSessions ? (
             <div className="flex flex-col gap-2 p-3">
               <div className="h-8 bg-slate-200/50 rounded-lg animate-pulse" />
@@ -411,16 +410,14 @@ export default function Dashboard() {
               <div
                 key={session.id}
                 onClick={() => handleSelectSession(session.id)}
-                className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border ${
-                  activeSessionId === session.id
+                className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border ${activeSessionId === session.id
                     ? 'bg-white border-slate-200 text-slate-950 shadow-sm font-semibold'
                     : 'bg-transparent border-transparent hover:bg-slate-200/40 text-slate-500 hover:text-slate-800'
-                }`}
+                  }`}
               >
                 <div className="flex items-center gap-2.5 overflow-hidden w-[80%]">
-                  <MessageSquare className={`w-4.5 h-4.5 flex-shrink-0 ${
-                    activeSessionId === session.id ? 'text-violet-500' : 'text-slate-400'
-                  }`} />
+                  <MessageSquare className={`w-4.5 h-4.5 flex-shrink-0 ${activeSessionId === session.id ? 'text-violet-500' : 'text-slate-400'
+                    }`} />
                   <span className="text-sm truncate">{session.title}</span>
                 </div>
                 <button
@@ -475,7 +472,7 @@ export default function Dashboard() {
                 <Menu className="w-5 h-5" />
               </button>
             )}
-            
+
             {/* Active Thread Details */}
             <div className="hidden sm:flex flex-col min-w-0">
               <h3 className="text-sm font-bold text-slate-800 truncate max-w-[200px] md:max-w-[400px]">
@@ -504,7 +501,7 @@ export default function Dashboard() {
                   className="fixed inset-0 z-20 cursor-default"
                   onClick={() => setProviderDropdownOpen(false)}
                 />
-                
+
                 <div className="absolute right-0 mt-2 w-56 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
                   <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 mb-1">
                     Select Brain Engine
@@ -519,16 +516,14 @@ export default function Dashboard() {
                           setSelectedProvider(p.id)
                           setProviderDropdownOpen(false)
                         }}
-                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${
-                          isSelected
+                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
                             ? 'bg-slate-100 text-slate-900 font-bold'
                             : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
-                        }`}
+                          }`}
                       >
                         <div className="flex items-center gap-2.5">
-                          <Icon className={`w-4 h-4 ${
-                            p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : 'text-slate-500'
-                          }`} />
+                          <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : 'text-slate-500'
+                            }`} />
                           <span>{p.name}</span>
                         </div>
                         {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
@@ -596,11 +591,10 @@ export default function Dashboard() {
                   >
                     {/* Message Bubble Container */}
                     <div
-                      className={`relative flex flex-col p-4 rounded-2xl border transition-all ${
-                        isUser
+                      className={`relative flex flex-col p-4 rounded-2xl border transition-all ${isUser
                           ? 'bg-violet-50 border-violet-100 text-slate-800 max-w-[85%] sm:max-w-[75%]'
                           : 'bg-white border-slate-200/80 text-slate-800 max-w-[85%] sm:max-w-[75%] shadow-sm'
-                      }`}
+                        }`}
                     >
                       {/* Message Meta Header */}
                       <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
@@ -703,6 +697,60 @@ export default function Dashboard() {
                 placeholder={isStreaming ? "Awaiting assistant response..." : `Message ${activeProvider.name}...`}
                 className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 placeholder-slate-400 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
               />
+
+              {/* Model Selector Dropdown - Re-located inside input container, on the right side */}
+              <div className="relative flex-shrink-0 self-end mb-0.5">
+                <button
+                  type="button"
+                  onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
+                >
+                  <ActiveProviderIcon className="w-4 h-4" />
+                  <span className="hidden sm:inline">{activeProvider.name}</span>
+                  <ChevronDown className="w-3.5 h-3.5 opacity-60" />
+                </button>
+
+                {providerDropdownOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-20 cursor-default"
+                      onClick={() => setProviderDropdownOpen(false)}
+                    />
+
+                    <div className="absolute right-0 bottom-full mb-2 w-56 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 mb-1">
+                        Select Brain Engine
+                      </div>
+                      {PROVIDERS.map(p => {
+                        const Icon = p.icon
+                        const isSelected = p.id === selectedProvider
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedProvider(p.id)
+                              setProviderDropdownOpen(false)
+                            }}
+                            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
+                                ? 'bg-slate-100 text-slate-900 font-bold'
+                                : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
+                              }`}
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : 'text-slate-500'
+                                }`} />
+                              <span>{p.name}</span>
+                            </div>
+                            {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+
               <button
                 type="submit"
                 disabled={!inputText.trim() || isStreaming}
@@ -720,3 +768,4 @@ export default function Dashboard() {
     </main>
   )
 }
+
