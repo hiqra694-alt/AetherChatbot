@@ -12,7 +12,6 @@ import {
   X,
   Send,
   Bot,
-  Sparkles,
   User,
   Copy,
   Check,
@@ -21,6 +20,11 @@ import {
   Flame,
   ChevronDown
 } from 'lucide-react'
+
+interface UserProfile {
+  id: string
+  email?: string
+}
 
 interface ChatSession {
   id: string
@@ -50,7 +54,7 @@ export default function Dashboard() {
   const supabase = createClient()
 
   // App state
-  const [user, setUser] = useState<any>(null)
+  const [user, setUser] = useState<UserProfile | null>(null)
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -69,13 +73,31 @@ export default function Dashboard() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  const fetchSessions = async () => {
+    setLoadingSessions(true)
+    try {
+      const { data, error } = await supabase
+        .from('chat_sessions')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      setSessions(data || [])
+    } catch (err) {
+      console.error('Error fetching sessions:', err)
+    } finally {
+      setLoadingSessions(false)
+    }
+  }
+
   // Fetch user data and chat sessions on mount
   useEffect(() => {
     const initApp = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
-        setUser(user)
-        await fetchSessions(user.id)
+        // Map user properties to avoid type issues
+        setUser({ id: user.id, email: user.email })
+        await fetchSessions()
       } else {
         router.push('/login')
       }
@@ -95,23 +117,6 @@ export default function Dashboard() {
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`
     }
   }, [inputText])
-
-  const fetchSessions = async (userId: string) => {
-    setLoadingSessions(true)
-    try {
-      const { data, error } = await supabase
-        .from('chat_sessions')
-        .select('*')
-        .order('created_at', { ascending: false })
-
-      if (error) throw error
-      setSessions(data || [])
-    } catch (err) {
-      console.error('Error fetching sessions:', err)
-    } finally {
-      setLoadingSessions(false)
-    }
-  }
 
   const fetchMessages = async (sessionId: string, showSpinner = true) => {
     if (showSpinner) {
@@ -320,10 +325,11 @@ export default function Dashboard() {
       setStreamingContent('')
       setIsStreaming(false)
 
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to complete message cycle:', err)
+      const errorObj = err as { message?: string }
       // Extract clean user-facing message from verbose API error responses
-      let errMsg: string = err.message || 'Unable to get a response. Please try again.'
+      let errMsg: string = errorObj.message || 'Unable to get a response. Please try again.'
       // Trim long API error strings to just the first meaningful sentence
       const msgMatch = errMsg.match(/'message':\s*'([^']+)'/)
       if (msgMatch) errMsg = msgMatch[1]
@@ -484,56 +490,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Model Selector Dropdown - flex-shrink-0 prevents it from being squeezed off screen */}
-          <div className="relative flex-shrink-0">
-            <button
-              onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
-              className={`flex items-center gap-2.5 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
-            >
-              <ActiveProviderIcon className="w-4 h-4" />
-              <span>{activeProvider.name}</span>
-              <ChevronDown className="w-3.5 h-3.5 opacity-60" />
-            </button>
 
-            {providerDropdownOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-20 cursor-default"
-                  onClick={() => setProviderDropdownOpen(false)}
-                />
-
-                <div className="absolute right-0 mt-2 w-56 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
-                  <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 mb-1">
-                    Select Brain Engine
-                  </div>
-                  {PROVIDERS.map(p => {
-                    const Icon = p.icon
-                    const isSelected = p.id === selectedProvider
-                    return (
-                      <button
-                        key={p.id}
-                        onClick={() => {
-                          setSelectedProvider(p.id)
-                          setProviderDropdownOpen(false)
-                        }}
-                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
-                            ? 'bg-slate-100 text-slate-900 font-bold'
-                            : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
-                          }`}
-                      >
-                        <div className="flex items-center gap-2.5">
-                          <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : 'text-slate-500'
-                            }`} />
-                          <span>{p.name}</span>
-                        </div>
-                        {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
-                      </button>
-                    )
-                  })}
-                </div>
-              </>
-            )}
-          </div>
         </header>
 
         {/* Chat Thread / Message History */}
@@ -768,4 +725,3 @@ export default function Dashboard() {
     </main>
   )
 }
-
