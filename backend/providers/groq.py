@@ -3,12 +3,12 @@ from openai import AsyncOpenAI # pyright: ignore [reportMissingImports]
 from typing import AsyncGenerator
 from providers.base import BaseProvider
 
-class GrokProvider(BaseProvider):
+class GroqProvider(BaseProvider):
     def __init__(self):
-        api_key = os.environ.get("GROK_API_KEY")
+        api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
-            raise ValueError("GROK_API_KEY is not configured.")
-        self.client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+            raise ValueError("GROQ_API_KEY is not configured.")
+        self.client = AsyncOpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
 
     async def stream_response(self, messages: list) -> AsyncGenerator[str, None]:
         formatted_messages = []
@@ -19,7 +19,7 @@ class GrokProvider(BaseProvider):
             })
             
         stream = await self.client.chat.completions.create(
-            model="grok-beta",
+            model="llama3-8b-8192",
             messages=formatted_messages,
             stream=True
         )

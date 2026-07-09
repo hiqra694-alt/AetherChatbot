@@ -3,7 +3,7 @@ from providers.mock import MockProvider
 from providers.gemini import GeminiProvider
 from providers.openai import OpenAIProvider
 from providers.anthropic import AnthropicProvider
-from providers.grok import GrokProvider
+from providers.groq import GroqProvider
 
 class ProviderFactory:
     @staticmethod
@@ -15,8 +15,8 @@ class ProviderFactory:
             return OpenAIProvider()
         elif name_lower == "claude" or name_lower == "anthropic":
             return AnthropicProvider()
-        elif name_lower == "grok":
-            return GrokProvider()
+        elif name_lower == "groq":
+            return GroqProvider()
         elif name_lower == "mock":
             return MockProvider()
         else:

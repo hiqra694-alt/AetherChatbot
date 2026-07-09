@@ -47,7 +47,7 @@ const PROVIDERS = [
   { id: 'gemini', name: 'Google Gemini', icon: Flame, color: 'text-violet-600 bg-violet-50 border-violet-200 hover:bg-violet-100', accentColor: 'violet' },
   { id: 'openai', name: 'OpenAI ChatGPT', icon: Zap, color: 'text-emerald-600 bg-emerald-50 border-emerald-200 hover:bg-emerald-100', accentColor: 'emerald' },
   { id: 'claude', name: 'Anthropic Claude', icon: Brain, color: 'text-amber-600 bg-amber-50 border-amber-200 hover:bg-amber-100', accentColor: 'amber' },
-  { id: 'grok', name: 'xAI Grok', icon: Cpu, color: 'text-blue-600 bg-blue-50 border-blue-200 hover:bg-blue-100', accentColor: 'blue' },
+  { id: 'groq', name: 'Groq LPU', icon: Cpu, color: 'text-blue-600 bg-blue-50 border-blue-200 hover:bg-blue-100', accentColor: 'blue' },
   { id: 'mock', name: 'Mock AI Provider', icon: Bot, color: 'text-slate-600 bg-slate-50 border-slate-200 hover:bg-slate-100', accentColor: 'slate' }
 ]
 
@@ -697,7 +697,7 @@ export default function Dashboard() {
                               }`}
                           >
                             <div className="flex items-center gap-2.5">
-                              <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : p.id === 'grok' ? 'text-blue-500' : 'text-slate-500'
+                              <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : p.id === 'groq' ? 'text-blue-500' : 'text-slate-500'
                                 }`} />
                               <span>{p.name}</span>
                             </div>
