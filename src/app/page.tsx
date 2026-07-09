@@ -21,7 +21,9 @@ import {
   Zap,
   Flame,
   ChevronDown,
-  Cpu
+  Cpu,
+  Sun,
+  Moon
 } from 'lucide-react'
 
 interface UserProfile {
@@ -73,6 +75,7 @@ export default function Dashboard() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [loadingSessions, setLoadingSessions] = useState(true)
   const [loadingMessages, setLoadingMessages] = useState(false)
+  const [theme, setTheme] = useState('light')
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -97,6 +100,14 @@ export default function Dashboard() {
 
   // Fetch user data and chat sessions on mount
   useEffect(() => {
+    // Check local storage for theme
+    const savedTheme = localStorage.getItem('aether_theme')
+    if (savedTheme) {
+      setTheme(savedTheme)
+    } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      setTheme('dark')
+    }
+
     const initApp = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
@@ -109,6 +120,15 @@ export default function Dashboard() {
     }
     initApp()
   }, [])
+
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark')
+    } else {
+      document.documentElement.classList.remove('dark')
+    }
+    localStorage.setItem('aether_theme', theme)
+  }, [theme])
 
   // Auto-scroll to bottom on message list updates or streaming content updates
   useEffect(() => {
@@ -366,10 +386,10 @@ export default function Dashboard() {
   const ActiveProviderIcon = activeProvider.icon
 
   return (
-    <main className="flex h-screen w-screen bg-slate-50 text-slate-800 overflow-hidden font-sans">
+    <main className="flex h-screen w-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 overflow-hidden font-sans">
       {/* 1. SIDEBAR PANEL */}
       <aside
-        className={`fixed md:relative z-20 h-full w-[280px] bg-slate-100/90 border-r border-slate-200/80 flex flex-col transition-all duration-300 ${sidebarOpen ? 'left-0' : '-left-[280px] md:-ml-[280px]'
+        className={`fixed md:relative z-20 h-full w-[280px] bg-slate-100/90 dark:bg-slate-900 border-r border-slate-200/80 dark:border-slate-800 flex flex-col transition-all duration-300 ${sidebarOpen ? 'left-0' : '-left-[280px] md:-ml-[280px]'
           }`}
       >
         {/* Sidebar Header */}
@@ -379,13 +399,13 @@ export default function Dashboard() {
               <Bot className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="font-bold text-base tracking-tight text-slate-800">AetherChat</h2>
+              <h2 className="font-bold text-base tracking-tight text-slate-800 dark:text-slate-100">AetherChat</h2>
               <span className="text-[10px] text-violet-600 font-bold uppercase tracking-wider">Multi-AI Portal</span>
             </div>
           </div>
           <button
             onClick={() => setSidebarOpen(false)}
-            className="md:hidden p-1.5 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-slate-800"
+            className="md:hidden p-1.5 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
           >
             <X className="w-5 h-5" />
           </button>
@@ -410,9 +430,9 @@ export default function Dashboard() {
 
           {loadingSessions ? (
             <div className="flex flex-col gap-2 p-3">
-              <div className="h-8 bg-slate-200/50 rounded-lg animate-pulse" />
-              <div className="h-8 bg-slate-200/50 rounded-lg animate-pulse" />
-              <div className="h-8 bg-slate-200/50 rounded-lg animate-pulse" />
+              <div className="h-8 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
+              <div className="h-8 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
+              <div className="h-8 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
             </div>
           ) : sessions.length === 0 ? (
             <div className="text-center py-8 px-4 text-xs text-slate-400">
@@ -424,8 +444,8 @@ export default function Dashboard() {
                 key={session.id}
                 onClick={() => handleSelectSession(session.id)}
                 className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border ${activeSessionId === session.id
-                    ? 'bg-white border-slate-200 text-slate-950 shadow-sm font-semibold'
-                    : 'bg-transparent border-transparent hover:bg-slate-200/40 text-slate-500 hover:text-slate-800'
+                    ? 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-950 dark:text-slate-100 shadow-sm font-semibold'
+                    : 'bg-transparent border-transparent hover:bg-slate-200/40 dark:hover:bg-slate-800/40 text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
                   }`}
               >
                 <div className="flex items-center gap-2.5 overflow-hidden w-[80%]">
@@ -446,20 +466,20 @@ export default function Dashboard() {
 
         {/* User Card & Logout */}
         {user && (
-          <div className="p-4 border-t border-slate-200 bg-slate-100/50 flex items-center justify-between gap-3">
+          <div className="p-4 border-t border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/60 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 overflow-hidden">
-              <div className="w-8 h-8 rounded-full bg-violet-600/10 border border-violet-500/20 flex items-center justify-center text-violet-600 font-bold uppercase flex-shrink-0 text-sm">
+              <div className="w-8 h-8 rounded-full bg-violet-600/10 dark:bg-violet-600/20 border border-violet-500/20 dark:border-violet-500/30 flex items-center justify-center text-violet-600 dark:text-violet-400 font-bold uppercase flex-shrink-0 text-sm">
                 {user.email?.charAt(0) || 'U'}
               </div>
               <div className="flex flex-col overflow-hidden">
-                <span className="text-xs font-semibold text-slate-850 truncate">{user.email}</span>
+                <span className="text-xs font-semibold text-slate-850 dark:text-slate-200 truncate">{user.email}</span>
                 <span className="text-[9px] text-slate-400 uppercase tracking-wider font-bold">Standard Account</span>
               </div>
             </div>
             <button
               onClick={handleLogout}
               title="Sign Out"
-              className="p-2 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-rose-500 transition-colors cursor-pointer"
+              className="p-2 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors cursor-pointer"
             >
               <LogOut className="w-4.5 h-4.5" />
             </button>
@@ -468,18 +488,27 @@ export default function Dashboard() {
       </aside>
 
       {/* 2. MAIN CHAT AREA */}
-      <section className="flex-1 h-[100dvh] max-h-[100dvh] flex flex-col overflow-hidden bg-slate-50/50 relative min-w-0">
+      <section className="flex-1 h-[100dvh] max-h-[100dvh] flex flex-col overflow-hidden bg-slate-50/50 dark:bg-slate-950 relative min-w-0">
         {/* Decorative background glows */}
         <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-violet-500/5 blur-[100px] pointer-events-none" />
         <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-cyan-500/5 blur-[100px] pointer-events-none" />
 
+        {/* Theme Toggle Button */}
+        <button
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          className="absolute top-4 right-4 z-50 p-2.5 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/80 dark:border-slate-800/80 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 shadow-sm transition-all cursor-pointer"
+          title="Toggle Theme"
+        >
+          {theme === 'dark' ? <Sun className="w-4.5 h-4.5" /> : <Moon className="w-4.5 h-4.5" />}
+        </button>
+
         {/* Top Navigation Bar (Only visible when sidebar is closed on mobile) */}
         {!sidebarOpen && (
-          <header className="h-16 border-b border-slate-200/80 bg-white/80 backdrop-blur-md flex items-center justify-between px-4 z-10 shrink-0">
+          <header className="h-16 border-b border-slate-200/80 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md flex items-center justify-between px-4 z-10 shrink-0">
             <div className="flex items-center gap-3 flex-1 min-w-0">
               <button
                 onClick={() => setSidebarOpen(true)}
-                className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+                className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 transition-colors cursor-pointer"
               >
                 <Menu className="w-5 h-5" />
               </button>
@@ -501,7 +530,7 @@ export default function Dashboard() {
                 <Bot className="w-10 h-10 text-white" />
               </div>
               <div>
-                <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-slate-900 via-slate-700 to-slate-500">
+                <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-slate-900 via-slate-700 to-slate-500 dark:from-slate-100 dark:via-slate-300 dark:to-slate-500">
                   Welcome to AetherChat
                 </h1>
                 <p className="text-sm text-slate-500 mt-2.5 max-w-md mx-auto leading-relaxed font-medium">
@@ -513,16 +542,16 @@ export default function Dashboard() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full mt-4">
                 <button
                   onClick={() => handleQuickPrompt("Write a clean, documented Python function to calculate Fibonacci sequences.")}
-                  className="p-4 bg-white hover:bg-slate-50 border border-slate-205 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-violet-500/30 group cursor-pointer shadow-sm"
+                  className="p-4 bg-white dark:bg-slate-900/40 hover:bg-slate-50 dark:hover:bg-slate-900/80 border border-slate-205 dark:border-slate-800/80 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-violet-500/30 group cursor-pointer shadow-sm"
                 >
-                  <span className="block text-xs font-bold text-slate-700 group-hover:text-slate-900">Write Python Code</span>
+                  <span className="block text-xs font-bold text-slate-700 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white">Write Python Code</span>
                   <span className="block text-[11px] text-slate-400 mt-1">Generate a documented Fibonacci algorithm.</span>
                 </button>
                 <button
                   onClick={() => handleQuickPrompt("Explain quantum physics principles in three simple bullet points.")}
-                  className="p-4 bg-white hover:bg-slate-50 border border-slate-205 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-cyan-500/30 group cursor-pointer shadow-sm"
+                  className="p-4 bg-white dark:bg-slate-900/40 hover:bg-slate-50 dark:hover:bg-slate-900/80 border border-slate-205 dark:border-slate-800/80 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-cyan-500/30 group cursor-pointer shadow-sm"
                 >
-                  <span className="block text-xs font-bold text-slate-700 group-hover:text-slate-900">Explain Physics Concepts</span>
+                  <span className="block text-xs font-bold text-slate-700 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white">Explain Physics Concepts</span>
                   <span className="block text-[11px] text-slate-400 mt-1">Summarize quantum principles cleanly.</span>
                 </button>
               </div>
@@ -543,8 +572,8 @@ export default function Dashboard() {
                     {/* Message Bubble Container */}
                     <div
                       className={`relative flex flex-col p-4 rounded-2xl border transition-all ${isUser
-                          ? 'bg-violet-50 border-violet-100 text-slate-800 max-w-[85%] sm:max-w-[75%]'
-                          : 'bg-white border-slate-200/80 text-slate-800 max-w-[85%] sm:max-w-[75%] shadow-sm'
+                          ? 'bg-violet-50 dark:bg-violet-600/10 border-violet-100 dark:border-violet-500/20 text-slate-800 dark:text-slate-200 max-w-[85%] sm:max-w-[75%]'
+                          : 'bg-white dark:bg-slate-900/50 border-slate-200/80 dark:border-slate-800/80 text-slate-800 dark:text-slate-300 max-w-[85%] sm:max-w-[75%] shadow-sm dark:shadow-md'
                         }`}
                     >
                       {/* Message Meta Header */}
@@ -552,7 +581,7 @@ export default function Dashboard() {
                         <MsgIcon className="w-3.5 h-3.5" />
                         <span>{isUser ? 'User Message' : 'AI Assistant'}</span>
                         {!isUser && providerObj && (
-                          <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-650">
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-650 dark:text-slate-300">
                             {providerObj.name}
                           </span>
                         )}
@@ -565,7 +594,7 @@ export default function Dashboard() {
                         </ReactMarkdown>
                       </div>
 
-                      <div className="flex justify-end mt-2 pt-1 border-t border-slate-100">
+                      <div className="flex justify-end mt-2 pt-1 border-t border-slate-100 dark:border-slate-800">
                         <button
                           onClick={() => handleCopyText(message.content, message.id)}
                           className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-slate-600 font-semibold transition-colors cursor-pointer"
@@ -591,11 +620,11 @@ export default function Dashboard() {
               {/* Real-time Streaming Response Rendering */}
               {isStreaming && streamingContent && (
                 <div className="flex gap-4 justify-start animate-fade-in">
-                  <div className="flex flex-col p-4 rounded-2xl border bg-white border-slate-200/80 text-slate-800 max-w-[85%] sm:max-w-[75%] shadow-sm">
+                  <div className="flex flex-col p-4 rounded-2xl border bg-white dark:bg-slate-900/50 border-slate-200/80 dark:border-slate-800/80 text-slate-800 dark:text-slate-300 max-w-[85%] sm:max-w-[75%] shadow-sm dark:shadow-md">
                     <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                       <Bot className="w-3.5 h-3.5" />
                       <span>AI Assistant</span>
-                      <span className="px-1.5 py-0.5 rounded bg-violet-50 border border-violet-100 text-violet-600 animate-pulse">
+                      <span className="px-1.5 py-0.5 rounded bg-violet-50 dark:bg-violet-600/10 border border-violet-100 dark:border-violet-500/20 text-violet-600 dark:text-violet-400 animate-pulse">
                         {activeProvider.name} (streaming)
                       </span>
                     </div>
@@ -612,7 +641,7 @@ export default function Dashboard() {
               {/* Pulsing loader when waiting for API route response */}
               {isStreaming && !streamingContent && (
                 <div className="flex gap-4 justify-start animate-fade-in">
-                  <div className="flex flex-col p-4 rounded-2xl border bg-white border-slate-200 text-slate-400 w-44 shadow-sm">
+                  <div className="flex flex-col p-4 rounded-2xl border bg-white dark:bg-slate-900/50 border-slate-200 dark:border-slate-800/80 text-slate-400 dark:text-slate-500 w-44 shadow-sm dark:shadow-md">
                     <div className="flex items-center gap-2 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                       <Bot className="w-3.5 h-3.5" />
                       <span>Thinking...</span>
@@ -633,9 +662,9 @@ export default function Dashboard() {
         </div>
 
         {/* Input Text Form Area */}
-        <footer className="p-4 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent border-t border-slate-200/60 relative z-10">
+        <footer className="p-4 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent dark:from-slate-950 dark:via-slate-950 border-t border-slate-200/60 dark:border-slate-900 relative z-10">
           <div className="max-w-3xl mx-auto">
-            <form onSubmit={handleSendMessage} className="relative flex items-end gap-2 bg-white border border-slate-200/80 focus-within:border-violet-400 focus-within:ring-2 focus-within:ring-violet-500/5 rounded-2xl p-2 transition-all shadow-sm">
+            <form onSubmit={handleSendMessage} className="relative flex items-end gap-2 bg-white dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 focus-within:border-violet-400 dark:focus-within:border-slate-700/80 focus-within:ring-2 focus-within:ring-violet-500/5 dark:focus-within:ring-0 rounded-2xl p-2 transition-all shadow-sm">
               <textarea
                 ref={textareaRef}
                 rows={1}
@@ -649,7 +678,7 @@ export default function Dashboard() {
                 }}
                 disabled={isStreaming}
                 placeholder={isStreaming ? "Awaiting assistant response..." : `Message ${activeProvider.name}...`}
-                className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 placeholder-slate-400 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
+                className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
               />
 
               {/* Model Selector Dropdown - Re-located inside input container, on the right side */}
@@ -671,8 +700,8 @@ export default function Dashboard() {
                       onClick={() => setProviderDropdownOpen(false)}
                     />
 
-                    <div className="absolute right-0 bottom-full mb-2 w-56 bg-white border border-slate-200 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
-                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 mb-1">
+                    <div className="absolute right-0 bottom-full mb-2 w-56 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-800 mb-1">
                         Select Brain Engine
                       </div>
                       {PROVIDERS.map(p => {
@@ -687,8 +716,8 @@ export default function Dashboard() {
                               setProviderDropdownOpen(false)
                             }}
                             className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
-                                ? 'bg-slate-100 text-slate-900 font-bold'
-                                : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
+                                ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white font-bold'
+                                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/50'
                               }`}
                           >
                             <div className="flex items-center gap-2.5">
@@ -708,7 +737,7 @@ export default function Dashboard() {
               <button
                 type="submit"
                 disabled={!inputText.trim() || isStreaming}
-                className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 disabled:to-slate-200 text-white rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
+                className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
               >
                 <Send className="w-4 h-4" />
               </button>
