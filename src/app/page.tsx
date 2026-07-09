@@ -76,6 +76,7 @@ export default function Dashboard() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const chatContainerRef = useRef<HTMLDivElement>(null)
 
   const fetchSessions = async () => {
     setLoadingSessions(true)
@@ -111,7 +112,9 @@ export default function Dashboard() {
 
   // Auto-scroll to bottom on message list updates or streaming content updates
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight
+    }
   }, [messages, streamingContent, isStreaming])
 
   // Adjust textarea height dynamically based on input
@@ -464,41 +467,28 @@ export default function Dashboard() {
         )}
       </aside>
 
-      {/* 2. MAIN CHAT AREA — keyed by session ID so React fully remounts on every session change */}
-      <section key={activeSessionId ?? 'new-chat'} className="flex-1 h-screen max-h-screen flex flex-col overflow-hidden bg-slate-50/50 relative min-w-0">
+      {/* 2. MAIN CHAT AREA */}
+      <section className="flex-1 h-[100dvh] max-h-[100dvh] flex flex-col overflow-hidden bg-slate-50/50 relative min-w-0">
         {/* Decorative background glows */}
         <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-violet-500/5 blur-[100px] pointer-events-none" />
         <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-cyan-500/5 blur-[100px] pointer-events-none" />
 
-        {/* Top Navigation Bar */}
-        <header className="h-16 border-b border-slate-200/80 bg-white/80 backdrop-blur-md flex items-center justify-between px-4 z-10">
-          {/* Left side: menu toggle + thread title — flex-1 min-w-0 lets it shrink without clipping right side */}
-          <div className="flex items-center gap-3 flex-1 min-w-0">
-            {!sidebarOpen && (
+        {/* Top Navigation Bar (Only visible when sidebar is closed on mobile) */}
+        {!sidebarOpen && (
+          <header className="h-16 border-b border-slate-200/80 bg-white/80 backdrop-blur-md flex items-center justify-between px-4 z-10 shrink-0">
+            <div className="flex items-center gap-3 flex-1 min-w-0">
               <button
                 onClick={() => setSidebarOpen(true)}
                 className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
               >
                 <Menu className="w-5 h-5" />
               </button>
-            )}
-
-            {/* Active Thread Details */}
-            <div className="hidden sm:flex flex-col min-w-0">
-              <h3 className="text-sm font-bold text-slate-800 truncate max-w-[200px] md:max-w-[400px]">
-                {activeSessionId ? sessions.find(s => s.id === activeSessionId)?.title : 'New Workspace'}
-              </h3>
-              <span className="text-[10px] text-slate-400 font-medium">
-                {activeSessionId ? 'Saved to Cloud Database' : 'Drafting message...'}
-              </span>
             </div>
-          </div>
-
-
-        </header>
+          </header>
+        )}
 
         {/* Chat Thread / Message History */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar min-h-0 relative z-0">
+        <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar min-h-0 relative z-0">
           {loadingMessages ? (
             <div className="flex flex-col items-center justify-center h-full space-y-3">
               <div className="w-8 h-8 rounded-full border-2 border-violet-500 border-t-transparent animate-spin" />
