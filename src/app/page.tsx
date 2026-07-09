@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/utils/supabase/client'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Plus,
   MessageSquare,
@@ -567,9 +569,11 @@ export default function Dashboard() {
                       </div>
 
                       {/* Content Body */}
-                      <p className="text-sm leading-relaxed whitespace-pre-wrap select-text break-words">
-                        {message.content}
-                      </p>
+                      <div className="text-sm leading-relaxed whitespace-pre-wrap select-text break-words [&>p]:mb-2 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_pre]:bg-slate-800 [&_pre]:text-slate-100 [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:my-2 [&_pre]:overflow-x-auto">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {message.content}
+                        </ReactMarkdown>
+                      </div>
 
                       <div className="flex justify-end mt-2 pt-1 border-t border-slate-100">
                         <button
@@ -606,10 +610,11 @@ export default function Dashboard() {
                       </span>
                     </div>
 
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                      {streamingContent}
-                      <span className="inline-block w-1.5 h-4 ml-1 bg-violet-500 animate-pulse align-middle" />
-                    </p>
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap break-words [&>p]:mb-2 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_pre]:bg-slate-800 [&_pre]:text-slate-100 [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:my-2 [&_pre]:overflow-x-auto">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {streamingContent + ' ▋'}
+                      </ReactMarkdown>
+                    </div>
                   </div>
                 </div>
               )}
