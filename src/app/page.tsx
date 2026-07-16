@@ -452,11 +452,9 @@ export default function Dashboard() {
 
       const errorMsg: Message = {
         id: Math.random().toString(),
-        session_id: currentSessionId || '',
         role: 'assistant',
         content: `⚠️ ${errMsg}`,
-        provider_used: selectedProvider,
-        created_at: new Date().toISOString()
+        provider_used: selectedProvider
       }
       setMessages(prev => [...prev, errorMsg])
       setIsStreaming(false)
