@@ -344,7 +344,7 @@ export default function Dashboard() {
       // 3. Trigger Streaming from Backend Proxy (using Supabase Auth JWT header)
       setIsStreaming(true)
       let streamedContent = ''
-      let streamedSources: Source[] | null = null
+      let streamedSources: Source[] | undefined = undefined
       setMessages(prev => [...prev, { id: 'temp', role: 'assistant', content: '', provider_used: selectedProvider }])
 
       const { data: { session } } = await supabase.auth.getSession()
