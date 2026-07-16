@@ -41,12 +41,18 @@ interface ChatSession {
   user_id: string
 }
 
+interface Source {
+  title: string
+  url: string
+  snippet: string
+}
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
   provider_used?: string
-  sources?: { title: string, url: string, snippet: string }[]
+  sources?: Source[]
 }
 
 const PROVIDERS = [
@@ -338,7 +344,7 @@ export default function Dashboard() {
       // 3. Trigger Streaming from Backend Proxy (using Supabase Auth JWT header)
       setIsStreaming(true)
       let streamedContent = ''
-      let streamedSources = null
+      let streamedSources: Source[] | null = null
       setMessages(prev => [...prev, { id: 'temp', role: 'assistant', content: '', provider_used: selectedProvider }])
 
       const { data: { session } } = await supabase.auth.getSession()
