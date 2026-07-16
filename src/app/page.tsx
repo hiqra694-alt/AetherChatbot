@@ -23,7 +23,10 @@ import {
   ChevronDown,
   Cpu,
   Sun,
-  Moon
+  Moon,
+  Globe,
+  Edit2,
+  AlertTriangle
 } from 'lucide-react'
 
 interface UserProfile {
@@ -40,11 +43,10 @@ interface ChatSession {
 
 interface Message {
   id: string
-  session_id: string
   role: 'user' | 'assistant'
   content: string
-  provider_used: string | null
-  created_at: string
+  provider_used?: string
+  sources?: { title: string, url: string, snippet: string }[]
 }
 
 const PROVIDERS = [
@@ -76,6 +78,14 @@ export default function Dashboard() {
   const [loadingSessions, setLoadingSessions] = useState(true)
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [theme, setTheme] = useState('light')
+
+  // New Feature States
+  const [showLogoutModal, setShowLogoutModal] = useState(false)
+  const [sessionToDelete, setSessionToDelete] = useState<string | null>(null)
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
+  const [editTitleText, setEditTitleText] = useState('')
+  const [useWebSearch, setUseWebSearch] = useState(false)
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -150,14 +160,40 @@ export default function Dashboard() {
       setLoadingMessages(true)
     }
     try {
-      const { data, error } = await supabase
+      const { data: messagesData, error } = await supabase
         .from('messages')
         .select('*')
         .eq('session_id', sessionId)
         .order('created_at', { ascending: true })
 
       if (error) throw error
-      setMessages(data || [])
+      
+      if (messagesData) {
+        const parsedMessages = messagesData.map(msg => {
+          let content = msg.content
+          let sources = undefined
+          
+          // Extract zero-migration sources tag
+          const sourceMatch = content.match(/<aether-sources>([\s\S]*?)<\/aether-sources>/)
+          if (sourceMatch) {
+            try {
+              sources = JSON.parse(sourceMatch[1])
+              content = content.replace(sourceMatch[0], '')
+            } catch (e) {
+              console.error("Error parsing embedded sources:", e)
+            }
+          }
+          
+          return {
+            id: msg.id,
+            role: msg.role,
+            content: content.trim(),
+            provider_used: msg.provider_used,
+            sources: sources
+          }
+        })
+        setMessages(parsedMessages)
+      }
     } catch (err) {
       console.error('Error fetching messages:', err)
     } finally {
@@ -190,26 +226,59 @@ export default function Dashboard() {
     setTimeout(() => textareaRef.current?.focus(), 50)
   }
 
-  const handleDeleteSession = async (e: React.MouseEvent, sessionId: string) => {
+  const handleDeleteSessionClick = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation()
+    setSessionToDelete(sessionId)
+  }
+
+  const confirmDeleteSession = async () => {
+    if (!sessionToDelete) return
     try {
       const { error } = await supabase
         .from('chat_sessions')
         .delete()
-        .eq('id', sessionId)
+        .eq('id', sessionToDelete)
 
       if (error) throw error
 
-      setSessions(prev => prev.filter(s => s.id !== sessionId))
-      if (activeSessionId === sessionId) {
+      setSessions(prev => prev.filter(s => s.id !== sessionToDelete))
+      if (activeSessionId === sessionToDelete) {
         handleNewChat()
       }
     } catch (err) {
       console.error('Error deleting session:', err)
+    } finally {
+      setSessionToDelete(null)
     }
   }
 
-  const handleLogout = async () => {
+  const handleRenameSession = async (sessionId: string) => {
+    if (!editTitleText.trim()) {
+      setEditingSessionId(null)
+      return
+    }
+    try {
+      const { error } = await supabase
+        .from('chat_sessions')
+        .update({ title: editTitleText })
+        .eq('id', sessionId)
+      
+      if (error) throw error
+
+      setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: editTitleText } : s))
+    } catch (err) {
+      console.error('Error renaming session:', err)
+    } finally {
+      setEditingSessionId(null)
+      setEditTitleText('')
+    }
+  }
+
+  const handleLogoutClick = () => {
+    setShowLogoutModal(true)
+  }
+
+  const confirmLogout = async () => {
     await supabase.auth.signOut()
     router.refresh()
     router.push('/login')
@@ -263,12 +332,14 @@ export default function Dashboard() {
 
       if (msgErr) throw msgErr
       if (userMsg) {
-        setMessages(prev => [...prev, userMsg])
+        setMessages(prev => [...prev, { ...userMsg, content: userMsg.content }])
       }
 
       // 3. Trigger Streaming from Backend Proxy (using Supabase Auth JWT header)
       setIsStreaming(true)
-      setStreamingContent('')
+      let streamedContent = ''
+      let streamedSources = null
+      setMessages(prev => [...prev, { id: 'temp', role: 'assistant', content: '', provider_used: selectedProvider }])
 
       const { data: { session } } = await supabase.auth.getSession()
       const token = session?.access_token || ''
@@ -281,27 +352,19 @@ export default function Dashboard() {
         },
         body: JSON.stringify({
           provider: selectedProvider,
-          sessionId: currentSessionId
+          sessionId: currentSessionId,
+          useWebSearch: useWebSearch
         })
       })
 
       if (!response.ok) {
-        // Safely parse error — backend may return plain text (e.g. "Internal Server Error")
-        let errDetail = `HTTP ${response.status}: Request failed.`
-        try {
-          const errorData = await response.json()
-          errDetail = errorData.detail || errorData.error || errDetail
-        } catch {
-          try { errDetail = await response.text() } catch { /* ignore */ }
-        }
-        throw new Error(errDetail)
+        throw new Error('Request failed.')
       }
 
       const reader = response.body?.getReader()
       const decoder = new TextDecoder()
       if (!reader) throw new Error('No stream reader available.')
 
-      let streamedText = ''
       let streamError: string | null = null
 
       while (true) {
@@ -318,39 +381,57 @@ export default function Dashboard() {
             try {
               const parsed = JSON.parse(dataStr)
               if (parsed.content) {
-                streamedText += parsed.content
-                setStreamingContent(streamedText)
-              } else if (parsed.error) {
-                // Backend sent an error event (quota, model not found, etc.)
-                streamError = parsed.error
+                streamedContent += parsed.content
+                setMessages(prev => {
+                  const newMsgs = [...prev]
+                  const last = newMsgs[newMsgs.length - 1]
+                  if (last && last.role === 'assistant') {
+                    last.content = streamedContent
+                    if (streamedSources) last.sources = streamedSources
+                  }
+                  return newMsgs
+                })
+                } else if (parsed.sources) {
+                  streamedSources = parsed.sources
+                  setMessages(prev => {
+                    const newMsgs = [...prev]
+                    const last = newMsgs[newMsgs.length - 1]
+                    if (last && last.role === 'assistant') {
+                      last.sources = streamedSources
+                    }
+                    return newMsgs
+                  })
+                } else if (parsed.error) {
+                  // Backend sent an error event (quota, model not found, etc.)
+                  streamError = parsed.error
+                }
+              } catch {
+                // Partial JSON fragment — safe to ignore
               }
-            } catch {
-              // Partial JSON fragment — safe to ignore
             }
           }
+          if (streamError) break
         }
 
-        // Stop reading as soon as an error was signaled
-        if (streamError) break
-      }
+        if (streamError) {
+          throw new Error(streamError)
+        }
 
-      if (streamError) {
-        throw new Error(streamError)
-      }
+        // 4. Once streaming is complete, append the assistant response to messages state
+        const mockAssistantMsg: Message = {
+          id: Math.random().toString(),
+          role: 'assistant',
+          content: streamedContent,
+          provider_used: selectedProvider,
+          sources: streamedSources || undefined
+        }
 
-      // 4. Once streaming is complete, append the assistant response to messages state
-      const mockAssistantMsg: Message = {
-        id: Math.random().toString(),
-        session_id: currentSessionId!,
-        role: 'assistant',
-        content: streamedText,
-        provider_used: selectedProvider,
-        created_at: new Date().toISOString()
-      }
-
-      setMessages(prev => [...prev, mockAssistantMsg])
-      setStreamingContent('')
-      setIsStreaming(false)
+        setMessages(prev => {
+          const newMsgs = [...prev]
+          newMsgs[newMsgs.length - 1] = mockAssistantMsg
+          return newMsgs
+        })
+        setIsStreaming(false)
 
     } catch (err: unknown) {
       console.error('Failed to complete message cycle:', err)
@@ -418,7 +499,7 @@ export default function Dashboard() {
             className="w-full py-2.5 px-4 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white font-semibold rounded-xl transition-all shadow-md active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            New Chat Thread
+            New Chat
           </button>
         </div>
 
@@ -448,17 +529,55 @@ export default function Dashboard() {
                     : 'bg-transparent border-transparent hover:bg-slate-200/40 dark:hover:bg-slate-800/40 text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
                   }`}
               >
-                <div className="flex items-center gap-2.5 overflow-hidden w-[80%]">
-                  <MessageSquare className={`w-4.5 h-4.5 flex-shrink-0 ${activeSessionId === session.id ? 'text-violet-500' : 'text-slate-400'
-                    }`} />
-                  <span className="text-sm truncate">{session.title}</span>
-                </div>
-                <button
-                  onClick={(e) => handleDeleteSession(e, session.id)}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-200/80 rounded text-slate-400 hover:text-rose-500 transition-all cursor-pointer"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                {editingSessionId === session.id ? (
+                  <div className="flex items-center gap-2 w-full mr-2" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      value={editTitleText}
+                      onChange={(e) => setEditTitleText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRenameSession(session.id)
+                        if (e.key === 'Escape') setEditingSessionId(null)
+                      }}
+                      autoFocus
+                      className="flex-1 bg-white dark:bg-slate-900 border border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-500 rounded px-2 py-1 text-sm text-slate-800 dark:text-slate-200"
+                    />
+                    <button onClick={() => handleRenameSession(session.id)} className="p-1 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 rounded">
+                      <Check className="w-4 h-4" />
+                    </button>
+                    <button onClick={() => setEditingSessionId(null)} className="p-1 text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 rounded">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2.5 overflow-hidden w-[70%]">
+                      <MessageSquare className={`w-4.5 h-4.5 flex-shrink-0 ${activeSessionId === session.id ? 'text-violet-500' : 'text-slate-400'
+                        }`} />
+                      <span className="text-sm truncate">{session.title}</span>
+                    </div>
+                    <div className="flex opacity-0 group-hover:opacity-100 transition-all">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setEditingSessionId(session.id)
+                          setEditTitleText(session.title)
+                        }}
+                        className="p-1 hover:bg-slate-200/80 dark:hover:bg-slate-700 rounded text-slate-400 hover:text-violet-500 transition-all cursor-pointer"
+                        title="Rename"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => handleDeleteSessionClick(e, session.id)}
+                        className="p-1 hover:bg-slate-200/80 dark:hover:bg-slate-700 rounded text-slate-400 hover:text-rose-500 transition-all cursor-pointer"
+                        title="Delete"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             ))
           )}
@@ -477,7 +596,7 @@ export default function Dashboard() {
               </div>
             </div>
             <button
-              onClick={handleLogout}
+              onClick={handleLogoutClick}
               title="Sign Out"
               className="p-2 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors cursor-pointer"
             >
@@ -567,69 +686,85 @@ export default function Dashboard() {
                 return (
                   <div
                     key={message.id}
-                    className={`flex gap-4 animate-fade-in ${isUser ? 'justify-end' : 'justify-start'}`}
+                    className={`flex animate-fade-in ${isUser ? 'justify-end' : 'justify-start'}`}
                   >
-                    {/* Message Bubble Container */}
-                    <div
-                      className={`relative flex flex-col p-4 rounded-2xl border transition-all ${isUser
-                          ? 'bg-violet-50 dark:bg-violet-600/10 border-violet-100 dark:border-violet-500/20 text-slate-800 dark:text-slate-200 max-w-[85%] sm:max-w-[75%]'
-                          : 'bg-white dark:bg-slate-900/50 border-slate-200/80 dark:border-slate-800/80 text-slate-800 dark:text-slate-300 max-w-[85%] sm:max-w-[75%] shadow-sm dark:shadow-md'
-                        }`}
-                    >
-                      {/* Message Meta Header */}
-                      <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                        <MsgIcon className="w-3.5 h-3.5" />
-                        <span>{isUser ? 'User Message' : 'AI Assistant'}</span>
-                        {!isUser && providerObj && (
-                          <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-650 dark:text-slate-300">
-                            {providerObj.name}
-                          </span>
+                    {isUser ? (
+                      /* USER MESSAGE: Solid theme bubble */
+                      <div className="bg-violet-600 text-white px-5 py-3.5 rounded-2xl rounded-tr-sm max-w-[85%] sm:max-w-[75%] shadow-sm text-sm whitespace-pre-wrap leading-relaxed">
+                        {message.content}
+                      </div>
+                    ) : (
+                      /* AI MESSAGE: Clean text on background */
+                      <div className="flex flex-col max-w-[90%] sm:max-w-[85%] w-full">
+                        {/* Researched Indicator */}
+                        {message.sources && message.sources.length > 0 && (
+                          <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                            <Check className="w-3.5 h-3.5" />
+                            Web researched • {message.sources.length} sources
+                          </div>
+                        )}
+
+                        {/* Content Body */}
+                        <div className="text-sm leading-relaxed whitespace-pre-wrap select-text break-words [&>p]:mb-3 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&>ul]:mb-3 [&>ol]:mb-3 [&_code]:bg-slate-200/50 [&_code]:dark:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_pre]:bg-slate-900 [&_pre]:text-slate-50 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:my-3 [&_pre]:overflow-x-auto [&_a]:text-violet-600 [&_a]:dark:text-violet-400 [&_a]:font-medium [&_a]:hover:underline text-slate-800 dark:text-slate-200">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {message.content}
+                          </ReactMarkdown>
+                        </div>
+
+                        {/* Web Research Sources UI */}
+                        {message.sources && message.sources.length > 0 && (
+                          <div className="mt-2 pt-4 flex flex-col gap-2.5 w-full">
+                            {message.sources.map((source, idx) => (
+                              <a
+                                key={idx}
+                                href={source.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="group flex flex-col p-3 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-violet-300 dark:hover:border-violet-600 transition-all text-left shadow-sm hover:shadow-md"
+                              >
+                                <div className="flex items-start gap-3">
+                                  <div className="w-5 h-5 flex-shrink-0 flex items-center justify-center rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-bold text-slate-500 dark:text-slate-400 group-hover:bg-violet-100 group-hover:dark:bg-violet-900/30 group-hover:text-violet-600 group-hover:dark:text-violet-400 transition-colors">
+                                    {idx + 1}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate group-hover:text-violet-600 dark:group-hover:text-violet-400 transition-colors">
+                                      {source.title}
+                                    </h4>
+                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 line-clamp-2 leading-relaxed">
+                                      {source.snippet}
+                                    </p>
+                                    <span className="text-[10px] font-medium text-slate-400 mt-1.5 block truncate opacity-80 group-hover:text-violet-600 dark:group-hover:text-violet-400 transition-colors">
+                                      {(() => {
+                                        try {
+                                          return new URL(source.url).hostname.replace('www.', '')
+                                        } catch {
+                                          return source.url
+                                        }
+                                      })()}
+                                    </span>
+                                  </div>
+                                </div>
+                              </a>
+                            ))}
+                          </div>
                         )}
                       </div>
-
-                      {/* Content Body */}
-                      <div className="text-sm leading-relaxed whitespace-pre-wrap select-text break-words [&>p]:mb-2 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_pre]:bg-slate-800 [&_pre]:text-slate-100 [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:my-2 [&_pre]:overflow-x-auto">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {message.content}
-                        </ReactMarkdown>
-                      </div>
-
-                      <div className="flex justify-end mt-2 pt-1 border-t border-slate-100 dark:border-slate-800">
-                        <button
-                          onClick={() => handleCopyText(message.content, message.id)}
-                          className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-slate-600 font-semibold transition-colors cursor-pointer"
-                        >
-                          {copiedId === message.id ? (
-                            <>
-                              <Check className="w-3 h-3 text-emerald-600" />
-                              <span className="text-emerald-600">Copied</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3 h-3" />
-                              <span>Copy</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </div>
+                    )}
                   </div>
                 )
               })}
 
               {/* Real-time Streaming Response Rendering */}
               {isStreaming && streamingContent && (
-                <div className="flex gap-4 justify-start animate-fade-in">
-                  <div className="flex flex-col p-4 rounded-2xl border bg-white dark:bg-slate-900/50 border-slate-200/80 dark:border-slate-800/80 text-slate-800 dark:text-slate-300 max-w-[85%] sm:max-w-[75%] shadow-sm dark:shadow-md">
-                    <div className="flex items-center gap-2 mb-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                      <Bot className="w-3.5 h-3.5" />
-                      <span>AI Assistant</span>
-                      <span className="px-1.5 py-0.5 rounded bg-violet-50 dark:bg-violet-600/10 border border-violet-100 dark:border-violet-500/20 text-violet-600 dark:text-violet-400 animate-pulse">
-                        {activeProvider.name} (streaming)
-                      </span>
-                    </div>
-
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap break-words [&>p]:mb-2 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_pre]:bg-slate-800 [&_pre]:text-slate-100 [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:my-2 [&_pre]:overflow-x-auto">
+                <div className="flex justify-start animate-fade-in w-full">
+                  <div className="flex flex-col max-w-[90%] sm:max-w-[85%] w-full">
+                    {useWebSearch && (
+                      <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 animate-pulse">
+                        <Globe className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '3s' }} />
+                        Researching the web...
+                      </div>
+                    )}
+                    <div className="text-sm leading-relaxed whitespace-pre-wrap break-words [&>p]:mb-3 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&>ul]:mb-3 [&>ol]:mb-3 [&_code]:bg-slate-200/50 [&_code]:dark:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_pre]:bg-slate-900 [&_pre]:text-slate-50 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:my-3 [&_pre]:overflow-x-auto [&_a]:text-violet-600 [&_a]:dark:text-violet-400 [&_a]:font-medium [&_a]:hover:underline text-slate-800 dark:text-slate-200">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {streamingContent + ' ▋'}
                       </ReactMarkdown>
@@ -640,17 +775,22 @@ export default function Dashboard() {
 
               {/* Pulsing loader when waiting for API route response */}
               {isStreaming && !streamingContent && (
-                <div className="flex gap-4 justify-start animate-fade-in">
-                  <div className="flex flex-col p-4 rounded-2xl border bg-white dark:bg-slate-900/50 border-slate-200 dark:border-slate-800/80 text-slate-400 dark:text-slate-500 w-44 shadow-sm dark:shadow-md">
-                    <div className="flex items-center gap-2 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                      <Bot className="w-3.5 h-3.5" />
-                      <span>Thinking...</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 py-1">
-                      <div className="w-2 h-2 rounded-full bg-violet-500 animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-violet-500 animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-2 h-2 rounded-full bg-violet-500 animate-bounce" style={{ animationDelay: '300ms' }} />
-                    </div>
+                <div className="flex justify-start animate-fade-in">
+                  <div className="flex items-center gap-2 text-slate-400 dark:text-slate-500">
+                    {useWebSearch ? (
+                      <>
+                        <Globe className="w-4 h-4 animate-spin" style={{ animationDuration: '3s' }} />
+                        <span className="text-xs font-medium animate-pulse">Researching the web...</span>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-1.5 px-2">
+                          <div className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                          <div className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                          <div className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               )}
@@ -665,6 +805,39 @@ export default function Dashboard() {
         <footer className="p-4 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent dark:from-slate-950 dark:via-slate-950 border-t border-slate-200/60 dark:border-slate-900 relative z-10">
           <div className="max-w-3xl mx-auto">
             <form onSubmit={handleSendMessage} className="relative flex items-end gap-2 bg-white dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 focus-within:border-violet-400 dark:focus-within:border-slate-700/80 focus-within:ring-2 focus-within:ring-violet-500/5 dark:focus-within:ring-0 rounded-2xl p-2 transition-all shadow-sm">
+              <div className="relative flex-shrink-0 self-end mb-0.5 ml-1">
+                <button
+                  type="button"
+                  onClick={() => setPlusMenuOpen(!plusMenuOpen)}
+                  className={`p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer ${useWebSearch ? 'text-violet-500 bg-violet-50 dark:bg-violet-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                  title="Attachments & Tools"
+                >
+                  <Plus className="w-5 h-5" />
+                </button>
+                
+                {plusMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-20 cursor-default" onClick={() => setPlusMenuOpen(false)} />
+                    <div className="absolute left-0 bottom-full mb-2 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-2 animate-fade-in">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUseWebSearch(!useWebSearch)
+                          setPlusMenuOpen(false)
+                        }}
+                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left cursor-pointer ${useWebSearch ? 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Globe className="w-4 h-4" />
+                          <span>Web Search</span>
+                        </div>
+                        {useWebSearch && <Check className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
               <textarea
                 ref={textareaRef}
                 rows={1}
@@ -748,6 +921,71 @@ export default function Dashboard() {
           </div>
         </footer>
       </section>
+
+      {/* MODALS */}
+      
+      {/* Logout Confirmation Modal */}
+      {showLogoutModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 max-w-sm w-full shadow-2xl scale-100 transition-all">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 bg-rose-100 dark:bg-rose-500/20 rounded-full flex items-center justify-center mb-4">
+                <LogOut className="w-6 h-6 text-rose-500" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-2">Sign Out</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
+                Are you sure you want to log out of AetherChat?
+              </p>
+              <div className="flex w-full gap-3">
+                <button
+                  onClick={() => setShowLogoutModal(false)}
+                  className="flex-1 py-2.5 px-4 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmLogout}
+                  className="flex-1 py-2.5 px-4 bg-rose-500 hover:bg-rose-600 text-white font-semibold rounded-xl transition-all shadow-md cursor-pointer"
+                >
+                  Sign Out
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {sessionToDelete && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 max-w-sm w-full shadow-2xl scale-100 transition-all">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 bg-rose-100 dark:bg-rose-500/20 rounded-full flex items-center justify-center mb-4">
+                <AlertTriangle className="w-6 h-6 text-rose-500" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-2">Delete Chat</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
+                This action cannot be undone. Are you sure you want to permanently delete this conversation?
+              </p>
+              <div className="flex w-full gap-3">
+                <button
+                  onClick={() => setSessionToDelete(null)}
+                  className="flex-1 py-2.5 px-4 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteSession}
+                  className="flex-1 py-2.5 px-4 bg-rose-500 hover:bg-rose-600 text-white font-semibold rounded-xl transition-all shadow-md cursor-pointer"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </main>
   )
 }

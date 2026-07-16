@@ -1,0 +1,30 @@
+from enum import Enum
+from typing import List
+from pydantic import BaseModel, Field
+
+class ProviderEnum(str, Enum):
+    """
+    Supported AI Providers.
+    Restricts the provider field to valid and expected string values.
+    """
+    OPENAI = "openai"
+    GEMINI = "gemini"
+    GROQ = "groq"
+    ANTHROPIC = "anthropic"
+    CLAUDE = "claude"
+    MOCK = "mock"
+
+class Message(BaseModel):
+    """
+    Represents a single chat message from either the user or the assistant.
+    """
+    role: str = Field(..., description="The role of the message sender (e.g., 'user', 'assistant')")
+    content: str = Field(..., description="The text content of the message")
+
+class ChatRequest(BaseModel):
+    """
+    Incoming payload for the chat endpoint.
+    """
+    provider: ProviderEnum = Field(..., description="The AI provider to use for this request")
+    sessionId: str = Field(..., description="Unique identifier for the chat session")
+    useWebSearch: bool = Field(False, description="Whether to fetch real-time web context")

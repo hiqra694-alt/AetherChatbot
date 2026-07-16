@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Backup / scratch files (not needed in repo)
+past_dark_theme_page.tsx
+past_themes.patch
+
+# Context / reference images
+context/
