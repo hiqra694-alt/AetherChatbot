@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { updateSession } from '@/utils/supabase/middleware'
 
-export async function proxy(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const url = request.nextUrl
   if (url.pathname === '/api/chat') {
     let backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_API_URL || 'http://127.0.0.1:8000'

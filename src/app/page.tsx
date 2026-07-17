@@ -698,22 +698,27 @@ export default function Dashboard() {
                         {message.content}
                       </div>
                     ) : (
-                      /* AI MESSAGE: Clean text on background */
-                      <div className="flex flex-col max-w-[90%] sm:max-w-[85%] w-full">
-                        {/* Researched Indicator */}
-                        {message.sources && message.sources.length > 0 && (
-                          <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
-                            <Check className="w-3.5 h-3.5" />
-                            Web researched • {message.sources.length} sources
-                          </div>
-                        )}
-
-                        {/* Content Body */}
-                        <div className="text-sm leading-relaxed whitespace-pre-wrap select-text break-words [&>p]:mb-3 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&>ul]:mb-3 [&>ol]:mb-3 [&_code]:bg-slate-200/50 [&_code]:dark:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_pre]:bg-slate-900 [&_pre]:text-slate-50 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:my-3 [&_pre]:overflow-x-auto [&_a]:text-violet-600 [&_a]:dark:text-violet-400 [&_a]:font-medium [&_a]:hover:underline text-slate-800 dark:text-slate-200">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {message.content}
-                          </ReactMarkdown>
+                      /* AI MESSAGE: Clean text with bot logo */
+                      <div className="flex gap-4 max-w-[95%] sm:max-w-[90%] w-full">
+                        {/* AetherChat Logo Avatar */}
+                        <div className="w-8 h-8 flex-shrink-0 rounded-xl bg-gradient-to-tr from-violet-600 to-cyan-500 flex items-center justify-center shadow-md mt-1">
+                          <Bot className="w-5 h-5 text-white" />
                         </div>
+                        <div className="flex flex-col w-full min-w-0">
+                          {/* Researched Indicator */}
+                          {message.sources && message.sources.length > 0 && (
+                            <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                              <Check className="w-3.5 h-3.5" />
+                              Web researched • {message.sources.length} sources
+                            </div>
+                          )}
+
+                          {/* Content Body */}
+                          <div className="text-[15px] leading-relaxed select-text break-words [&>p]:mb-4 [&>ul]:list-disc [&>ul]:ml-5 [&>ol]:list-decimal [&>ol]:ml-5 [&>ul]:mb-4 [&>ol]:mb-4 [&>ul>li]:mb-1 [&>ol>li]:mb-1 [&_code]:bg-slate-200/50 [&_code]:dark:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_pre]:bg-slate-900 [&_pre]:text-slate-50 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:my-4 [&_pre]:overflow-x-auto [&_a]:text-violet-600 [&_a]:dark:text-violet-400 [&_a]:font-medium [&_a]:hover:underline text-slate-800 dark:text-slate-200">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {message.content}
+                            </ReactMarkdown>
+                          </div>
 
                         {/* Web Research Sources UI */}
                         {message.sources && message.sources.length > 0 && (
@@ -752,6 +757,7 @@ export default function Dashboard() {
                             ))}
                           </div>
                         )}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -761,17 +767,23 @@ export default function Dashboard() {
               {/* Real-time Streaming Response Rendering */}
               {isStreaming && streamingContent && (
                 <div className="flex justify-start animate-fade-in w-full">
-                  <div className="flex flex-col max-w-[90%] sm:max-w-[85%] w-full">
-                    {useWebSearch && (
-                      <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 animate-pulse">
-                        <Globe className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '3s' }} />
-                        Researching the web...
+                  <div className="flex gap-4 max-w-[95%] sm:max-w-[90%] w-full">
+                    {/* AetherChat Logo Avatar */}
+                    <div className="w-8 h-8 flex-shrink-0 rounded-xl bg-gradient-to-tr from-violet-600 to-cyan-500 flex items-center justify-center shadow-md mt-1 animate-pulse">
+                      <Bot className="w-5 h-5 text-white" />
+                    </div>
+                    <div className="flex flex-col w-full min-w-0">
+                      {useWebSearch && (
+                        <div className="flex items-center gap-1.5 mb-3 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 animate-pulse">
+                          <Globe className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: '3s' }} />
+                          Researching the web...
+                        </div>
+                      )}
+                      <div className="text-[15px] leading-relaxed break-words [&>p]:mb-4 [&>ul]:list-disc [&>ul]:ml-5 [&>ol]:list-decimal [&>ol]:ml-5 [&>ul]:mb-4 [&>ol]:mb-4 [&>ul>li]:mb-1 [&>ol>li]:mb-1 [&_code]:bg-slate-200/50 [&_code]:dark:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_pre]:bg-slate-900 [&_pre]:text-slate-50 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:my-4 [&_pre]:overflow-x-auto [&_a]:text-violet-600 [&_a]:dark:text-violet-400 [&_a]:font-medium [&_a]:hover:underline text-slate-800 dark:text-slate-200">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {streamingContent + ' ▋'}
+                        </ReactMarkdown>
                       </div>
-                    )}
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap break-words [&>p]:mb-3 [&>ul]:list-disc [&>ul]:ml-4 [&>ol]:list-decimal [&>ol]:ml-4 [&>ul]:mb-3 [&>ol]:mb-3 [&_code]:bg-slate-200/50 [&_code]:dark:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_pre]:bg-slate-900 [&_pre]:text-slate-50 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:my-3 [&_pre]:overflow-x-auto [&_a]:text-violet-600 [&_a]:dark:text-violet-400 [&_a]:font-medium [&_a]:hover:underline text-slate-800 dark:text-slate-200">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {streamingContent + ' ▋'}
-                      </ReactMarkdown>
                     </div>
                   </div>
                 </div>
