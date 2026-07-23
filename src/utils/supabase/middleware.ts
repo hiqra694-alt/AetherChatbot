@@ -37,10 +37,11 @@ export async function updateSession(request: NextRequest) {
   // - If user is NOT authenticated, redirect to /login (except for /login /signup or api routes)
   // - If user IS authenticated, redirect away from /login /signup to /
   const isAuthPage = request.nextUrl.pathname.startsWith('/login')
+  const isAuthCallback = request.nextUrl.pathname.startsWith('/auth')
   const isApiPage = request.nextUrl.pathname.startsWith('/api')
   const isStaticAsset = request.nextUrl.pathname.includes('.') || request.nextUrl.pathname.startsWith('/_next')
 
-  if (!user && !isAuthPage && !isApiPage && !isStaticAsset) {
+  if (!user && !isAuthPage && !isAuthCallback && !isApiPage && !isStaticAsset) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)

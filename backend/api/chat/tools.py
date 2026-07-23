@@ -89,20 +89,20 @@ SEARCH_CHAT_HISTORY_TOOL = {
     "type": "function",
     "function": {
         "name": "search_chat_history",
-        "description": "Queries the past messages for this chat session. Use this to recall earlier context if the user refers back to something said earlier in the session.",
+        "description": "Searches past chat history across user sessions. Use ONLY when the user explicitly asks about previous sessions, past topics, or prior conversations.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The text to search for in past messages."
+                    "description": "Optional query string to search for specific topics or keywords in past chat sessions. Leave empty or pass empty string to retrieve recent messages across past sessions."
                 },
                 "limit": {
                     "type": "integer",
                     "description": "Max number of messages to return. Default is 5."
                 }
             },
-            "required": ["query"]
+            "required": []
         }
     }
 }
@@ -215,15 +215,41 @@ async def get_weather(city: str, unit: str = "celsius") -> str:
         logger.error(f"Get weather failed for city '{city}': {e}")
         return json.dumps({"error": f"Failed to fetch weather: {e}"})
 
-async def search_chat_history(supabase: Client, session_id: str, query: str, limit: int = 5) -> str:
+async def search_chat_history(supabase: Client, session_id: str = "", query: str = "", limit: int = 5) -> str:
     try:
-        res = supabase.table("messages").select("role, content").eq("session_id", session_id).ilike("content", f"%{query}%").order("created_at", desc=True).limit(limit).execute()
+        query_str = (query or "").strip()
+        meta_phrases = {
+            "previous sessions", "past sessions", "history", "all", "everything",
+            "previous chat", "past conversations", "what did we talk about", "what have i talked about"
+        }
+        is_meta_query = not query_str or query_str.lower() in meta_phrases
+
+        if not is_meta_query:
+            res = (
+                supabase.table("messages")
+                .select("role, content, created_at")
+                .ilike("content", f"%{query_str}%")
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            if res.data:
+                results = [{"role": row["role"], "content": row["content"]} for row in reversed(res.data)]
+                return json.dumps({"results": results})
+
+        # Fallback: retrieve the most recent messages across all sessions of the user
+        res = (
+            supabase.table("messages")
+            .select("role, content, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
         if not res.data:
-            return json.dumps({"result": "No past messages matched your query."})
-            
-        # Reverse to chronological order among the results returned
+            return json.dumps({"result": "No past chat history found for this user."})
+
         results = [{"role": row["role"], "content": row["content"]} for row in reversed(res.data)]
-        return json.dumps(results)
+        return json.dumps({"results": results})
     except Exception as e:
         logger.error(f"Search chat history failed: {e}")
         return json.dumps({"error": f"Database search failed: {e}"})
