@@ -176,7 +176,7 @@ export default function Dashboard() {
       
       if (messagesData) {
         const parsedMessages = messagesData.map(msg => {
-          let content = msg.content
+          let content = msg.content || ''
           let sources = undefined
           
           // Extract zero-migration sources tag
@@ -364,7 +364,18 @@ export default function Dashboard() {
       })
 
       if (!response.ok) {
-        throw new Error('Request failed.')
+        let errorMsg = 'Request failed.'
+        try {
+          const errorData = await response.json()
+          if (errorData.detail) {
+            errorMsg = typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail)
+          } else if (errorData.error) {
+            errorMsg = errorData.error
+          }
+        } catch (e) {
+          errorMsg = `Request failed with status: ${response.status}`
+        }
+        throw new Error(errorMsg)
       }
 
       const reader = response.body?.getReader()
@@ -372,13 +383,15 @@ export default function Dashboard() {
       if (!reader) throw new Error('No stream reader available.')
 
       let streamError: string | null = null
+      let buffer = ''
 
       while (true) {
         const { value, done } = await reader.read()
         if (done) break
 
-        const chunk = decoder.decode(value, { stream: true })
-        const lines = chunk.split('\n')
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
@@ -397,47 +410,63 @@ export default function Dashboard() {
                   }
                   return newMsgs
                 })
-                } else if (parsed.sources) {
-                  streamedSources = parsed.sources
-                  setMessages(prev => {
-                    const newMsgs = [...prev]
-                    const last = newMsgs[newMsgs.length - 1]
-                    if (last && last.role === 'assistant') {
-                      last.sources = streamedSources
-                    }
-                    return newMsgs
-                  })
-                } else if (parsed.error) {
-                  // Backend sent an error event (quota, model not found, etc.)
-                  streamError = parsed.error
-                }
-              } catch {
-                // Partial JSON fragment — safe to ignore
+              } else if (parsed.sources) {
+                streamedSources = parsed.sources
+                setMessages(prev => {
+                  const newMsgs = [...prev]
+                  const last = newMsgs[newMsgs.length - 1]
+                  if (last && last.role === 'assistant') {
+                    last.sources = streamedSources
+                  }
+                  return newMsgs
+                })
+              } else if (parsed.error) {
+                // Backend sent an error event (quota, model not found, etc.)
+                streamError = parsed.error
               }
+            } catch {
+              // Partial JSON fragment — safe to ignore
             }
           }
-          if (streamError) break
         }
+        if (streamError) break
+      }
 
-        if (streamError) {
-          throw new Error(streamError)
+      if (buffer.startsWith('data: ') && !streamError) {
+        const dataStr = buffer.slice(6).trim()
+        if (dataStr !== '[DONE]') {
+          try {
+            const parsed = JSON.parse(dataStr)
+            if (parsed.content) {
+              streamedContent += parsed.content
+            } else if (parsed.sources) {
+              streamedSources = parsed.sources
+            } else if (parsed.error) {
+              streamError = parsed.error
+            }
+          } catch {}
         }
+      }
 
-        // 4. Once streaming is complete, append the assistant response to messages state
-        const mockAssistantMsg: Message = {
-          id: Math.random().toString(),
-          role: 'assistant',
-          content: streamedContent,
-          provider_used: selectedProvider,
-          sources: streamedSources || undefined
-        }
+      if (streamError) {
+        throw new Error(streamError)
+      }
 
-        setMessages(prev => {
-          const newMsgs = [...prev]
-          newMsgs[newMsgs.length - 1] = mockAssistantMsg
-          return newMsgs
-        })
-        setIsStreaming(false)
+      // 4. Once streaming is complete, append the assistant response to messages state
+      const mockAssistantMsg: Message = {
+        id: Math.random().toString(),
+        role: 'assistant',
+        content: streamedContent,
+        provider_used: selectedProvider,
+        sources: streamedSources || undefined
+      }
+
+      setMessages(prev => {
+        const newMsgs = [...prev]
+        newMsgs[newMsgs.length - 1] = mockAssistantMsg
+        return newMsgs
+      })
+      setIsStreaming(false)
 
     } catch (err: unknown) {
       console.error('Failed to complete message cycle:', err)
@@ -456,7 +485,15 @@ export default function Dashboard() {
         content: `⚠️ ${errMsg}`,
         provider_used: selectedProvider
       }
-      setMessages(prev => [...prev, errorMsg])
+      setMessages(prev => {
+        const newMsgs = [...prev]
+        if (newMsgs.length > 0 && newMsgs[newMsgs.length - 1].id === 'temp') {
+          newMsgs[newMsgs.length - 1] = errorMsg
+        } else {
+          newMsgs.push(errorMsg)
+        }
+        return newMsgs
+      })
       setIsStreaming(false)
       setStreamingContent('')
     }

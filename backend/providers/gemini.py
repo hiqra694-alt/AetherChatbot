@@ -15,13 +15,15 @@ class GeminiProvider(BaseProvider):
             raise ValueError("GEMINI_API_KEY is not configured.")
         genai.configure(api_key=api_key)
 
-    async def stream_response(self, messages: list) -> AsyncGenerator[str, None]:
+    async def stream_response(self, messages: list, tools: list = None) -> AsyncGenerator[str, None]:
         contents = []
         for m in messages:
-            role = "user" if m["role"] == "user" else "model"
+            msg_role = getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else "user")
+            msg_content = getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else "")
+            role = "user" if msg_role == "user" else "model"
             contents.append({
                 "role": role,
-                "parts": [m["content"]]
+                "parts": [msg_content or ""]
             })
             
         model = genai.GenerativeModel("gemini-2.0-flash-lite")

@@ -11,17 +11,7 @@ export async function middleware(request: NextRequest) {
     backendBaseUrl = backendBaseUrl.replace(/\/$/, '')
     const targetUrl = `${backendBaseUrl}/api/chat`
     
-    // Parse target host to override the Host header so Vercel routing works correctly
-    const targetHost = new URL(targetUrl).host
-    
-    const requestHeaders = new Headers(request.headers)
-    requestHeaders.set('host', targetHost)
-    
-    return NextResponse.rewrite(new URL(targetUrl), {
-      request: {
-        headers: requestHeaders,
-      },
-    })
+    return NextResponse.rewrite(new URL(targetUrl))
   }
 
   return await updateSession(request)

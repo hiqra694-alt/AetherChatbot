@@ -13,7 +13,7 @@ from providers.mock import MockProvider # pyright: ignore [reportMissingImports]
 
 client = TestClient(app)
 
-@patch("main.create_client")
+@patch("api.chat.routers.create_client")
 def test_chat_endpoint_mock_provider(mock_create_client):
     # Setup mock supabase client response
     mock_supabase = MagicMock()

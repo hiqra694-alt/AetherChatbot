@@ -5,11 +5,23 @@ from fastapi import HTTPException
 from supabase import Client
 from api.chat.schemas import Message, ProviderEnum
 from providers.factory import ProviderFactory
-import httpx
-from bs4 import BeautifulSoup
-import urllib.parse
+from providers.base import BaseProvider
+from api.chat.tools import BASE_TOOLS, DUCKDUCKGO_SEARCH_TOOL, execute_tool
 
 logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = Message(
+    role="system",
+    content=(
+        "You are AetherChat, a smart, helpful AI assistant.\n\n"
+        "CRITICAL INSTRUCTIONS & TOOL RULES:\n"
+        "1. TOOL RESTRICTION: You may ONLY call tools that are explicitly present in your active tools menu. NEVER invent or invoke unlisted tool names (e.g., 'brave_search', 'google_search').\n\n"
+        "2. WEB SEARCH DISABLED BEHAVIOR: If the user asks for real-time news, current events, or facts beyond your training, and the web search tool is NOT in your tools menu, answer conversationally like this:\n"
+        "   'My knowledge is limited up to my training cutoff date, and Web Search is currently turned off. Please toggle Web Search ON at the bottom of the chat if you'd like me to fetch live up-to-date information!'\n\n"
+        "3. TOOL ERROR HANDLING: If a tool returns an error payload (e.g., {'error': '...'}), do NOT output raw code, JSON strings, or function names (e.g., 'get_weather'). Apologize naturally and explain the issue in plain English (e.g., 'I wasn't able to retrieve the weather right now due to a temporary service delay.').\n\n"
+        "4. NO IMPLEMENTATION LEAKS: Never reveal function names, tool arguments, or API execution mechanics to the end user. Keep all responses direct, clean, and conversational."
+    )
+)
 
 class ChatService:
     @staticmethod
@@ -20,6 +32,7 @@ class ChatService:
         except Exception as db_err:
             logger.error(f"Database error fetching messages: {db_err}")
             raise HTTPException(status_code=500, detail=f"Failed to fetch conversation history: {str(db_err)}")
+
 
     @staticmethod
     def get_provider(provider_enum: ProviderEnum) -> BaseProvider:
@@ -42,76 +55,77 @@ class ChatService:
         use_web_search: bool = False
     ) -> AsyncGenerator[str, None]:
         search_results_json = []
+        active_tools = list(BASE_TOOLS)
+        if use_web_search:
+            active_tools.append(DUCKDUCKGO_SEARCH_TOOL)
 
-        if use_web_search and history:
-            last_message = history[-1].content
-            try:
-                logger.info(f"Performing Web Search for query: {last_message}")
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                }
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post("https://html.duckduckgo.com/html/", data={"q": last_message}, headers=headers, timeout=10.0)
-                    
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                results = []
-                
-                for div in soup.find_all('div', class_='result'):
-                    title_tag = div.find('h2', class_='result__title')
-                    snippet_tag = div.find('a', class_='result__snippet')
-                    url_tag = div.find('a', class_='result__url')
-                    
-                    if title_tag and snippet_tag and url_tag:
-                        a_tag = title_tag.find('a')
-                        if a_tag:
-                            title = a_tag.get_text(strip=True)
-                            snippet = snippet_tag.get_text(strip=True)
-                            raw_url = url_tag.get('href', '')
-                            
-                            url = raw_url
-                            if raw_url.startswith('/l/?uddg='):
-                                parsed_url = urllib.parse.parse_qs(urllib.parse.urlparse(raw_url).query)
-                                if 'uddg' in parsed_url:
-                                    url = parsed_url['uddg'][0]
-                            
-                            results.append({
-                                "title": title,
-                                "url": url,
-                                "snippet": snippet
-                            })
-                            
-                    if len(results) >= 5:
-                        break
-                
-                search_results_json = results
-                
-                if results:
-                    context_str = "\n".join([f"[{i+1}] {res['title']}\nURL: {res['url']}\nSnippet: {res['snippet']}\n" for i, res in enumerate(results)])
-                    injection = f"\n\n[SYSTEM NOTE: The following are real-time web search results for the user's query. Use them to answer accurately. Cite your sources using inline citations like [1] or [2] next to the relevant facts. At the end of your response, output a 'Sources' section listing the references. If the results are irrelevant, ignore them.]\n{context_str}"
-                    history[-1].content += injection
-            except Exception as search_err:
-                logger.error(f"Web Search failed: {search_err}")
-                # We do not raise an error, just gracefully degrade to standard generation.
+        if not history or history[0].role != "system":
+            history.insert(0, SYSTEM_PROMPT)
+        else:
+            history[0] = SYSTEM_PROMPT
 
         full_text = ""
         try:
-            if search_results_json:
-                yield f"data: {json.dumps({'sources': search_results_json})}\n\n"
-
-            async for chunk in provider_instance.stream_response(history):
-                if await request_is_disconnected():
-                    logger.info("Client disconnected during stream. Terminating.")
-                    break
+            for _ in range(5):
+                stream = provider_instance.stream_response(history, tools=active_tools)
+                tool_calls_received = None
+                turn_text = ""
+                
+                async for chunk in stream:
+                    if await request_is_disconnected():
+                        logger.info("Client disconnected during stream. Terminating.")
+                        return
+                        
+                    if isinstance(chunk, dict) and chunk.get("type") == "tool_calls":
+                        tool_calls_received = chunk.get("tool_calls")
+                    elif isinstance(chunk, str):
+                        turn_text += chunk
+                        full_text += chunk
+                        yield f"data: {json.dumps({'content': chunk})}\n\n"
+                
+                if tool_calls_received:
+                    history.append(Message(role="assistant", content=turn_text if turn_text.strip() else None, tool_calls=tool_calls_received))
                     
-                full_text += chunk
-                yield f"data: {json.dumps({'content': chunk})}\n\n"
+                    for tc in tool_calls_received:
+                        tool_call_id = tc["id"]
+                        tool_name = tc["function"]["name"]
+                        try:
+                            tool_args = json.loads(tc["function"]["arguments"])
+                        except json.JSONDecodeError:
+                            tool_args = {}
+                            
+                        # Execute the tool using the master dispatcher
+                        result_str = await execute_tool(tool_name, tool_args, supabase, session_id)
+                        
+                        if tool_name == "duckduckgo_search":
+                            try:
+                                parsed = json.loads(result_str)
+                                if isinstance(parsed, list):
+                                    search_results_json.extend(parsed)
+                                    yield f"data: {json.dumps({'sources': parsed})}\n\n"
+                            except Exception:
+                                pass
+                                
+                        history.append(Message(
+                            role="tool", 
+                            content=result_str,
+                            tool_call_id=tool_call_id,
+                            name=tool_name
+                        ))
+                else:
+                    break
             
             if not await request_is_disconnected():
                 yield "data: [DONE]\n\n"
                 
         except Exception as stream_err:
             logger.error(f"Error during stream generation: {stream_err}")
-            yield f"data: {json.dumps({'error': str(stream_err)})}\n\n"
+            err_msg = str(stream_err)
+            if "tool call validation failed" in err_msg or "attempted to call tool" in err_msg:
+                user_friendly_err = "I am unable to process that tool request. Web Search is currently turned off. Please toggle Web Search ON at the bottom of the chat if you'd like live up-to-date information."
+            else:
+                user_friendly_err = err_msg
+            yield f"data: {json.dumps({'error': user_friendly_err})}\n\n"
         finally:
             if full_text.strip():
                 if search_results_json:

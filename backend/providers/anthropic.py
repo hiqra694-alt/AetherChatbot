@@ -10,15 +10,15 @@ class AnthropicProvider(BaseProvider):
             raise ValueError("ANTHROPIC_API_KEY is not configured.")
         self.client = AsyncAnthropic(api_key=api_key)
 
-    async def stream_response(self, messages: list) -> AsyncGenerator[str, None]:
+    async def stream_response(self, messages: list, tools: list = None) -> AsyncGenerator[str, None]:
         formatted_messages = []
         for m in messages:
-            role = m["role"]
-            if role not in ["user", "assistant"]:
-                role = "user"
+            msg_role = getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else "user")
+            msg_content = getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else "")
+            role = msg_role if msg_role in ["user", "assistant"] else "user"
             formatted_messages.append({
                 "role": role,
-                "content": m["content"]
+                "content": msg_content or ""
             })
             
         async with self.client.messages.stream(
