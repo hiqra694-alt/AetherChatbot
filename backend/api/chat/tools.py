@@ -31,7 +31,7 @@ CALCULATOR_TOOL = {
     "type": "function",
     "function": {
         "name": "calculator",
-        "description": "Evaluates a basic arithmetic expression.",
+        "description": "Evaluates a basic arithmetic expression. Enforce strict usage for explicit arithmetic requests only.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -55,7 +55,7 @@ GET_TIME_TOOL = {
             "properties": {
                 "timezone": {
                     "type": "string",
-                    "description": "The IANA timezone string, e.g. 'America/New_York', 'Asia/Tokyo', 'UTC'. Default is 'UTC'."
+                    "description": "The city name or IANA timezone string to get the current time for (e.g. 'Tokyo', 'London', 'America/New_York'). Default is 'UTC'."
                 }
             },
             "required": ["timezone"]
@@ -89,7 +89,7 @@ SEARCH_CHAT_HISTORY_TOOL = {
     "type": "function",
     "function": {
         "name": "search_chat_history",
-        "description": "Searches past chat history across user sessions. Use ONLY when the user explicitly asks about previous sessions, past topics, or prior conversations.",
+        "description": "Searches past chat history across user sessions. Use ONLY when the user explicitly asks about past topics, prior conversations, or earlier messages. Do NOT invoke for general capability questions, greetings, or short ambiguous inputs.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -167,17 +167,42 @@ async def calculator(expression: str) -> str:
         return json.dumps({"result": str(result)})
     except Exception as e:
         logger.error(f"Calculator failed for expression '{expression}': {e}")
-        return json.dumps({"error": f"Failed to evaluate expression: {e}"})
+        return json.dumps({"error": "Failed to evaluate expression."})
 
 async def get_current_time(timezone: str = "UTC") -> str:
     try:
-        tz = zoneinfo.ZoneInfo(timezone)
+        # Map common city names to IANA timezones
+        city_map = {
+            "tokyo": "Asia/Tokyo",
+            "london": "Europe/London",
+            "new york": "America/New_York",
+            "paris": "Europe/Paris",
+            "sydney": "Australia/Sydney",
+            "berlin": "Europe/Berlin",
+            "dubai": "Asia/Dubai",
+            "singapore": "Asia/Singapore",
+            "los angeles": "America/Los_Angeles",
+            "san francisco": "America/Los_Angeles",
+            "chicago": "America/Chicago",
+            "toronto": "America/Toronto",
+            "seattle": "America/Los_Angeles",
+            "mumbai": "Asia/Kolkata",
+            "delhi": "Asia/Kolkata",
+            "beijing": "Asia/Shanghai",
+            "shanghai": "Asia/Shanghai",
+            "hong kong": "Asia/Hong_Kong",
+        }
+        
+        normalized_tz = timezone.lower().strip()
+        resolved_tz = city_map.get(normalized_tz, timezone)
+        
+        tz = zoneinfo.ZoneInfo(resolved_tz)
         now = datetime.now(tz)
         formatted_time = now.strftime("%Y-%m-%d %H:%M:%S %Z, %A")
         return json.dumps({"time": formatted_time})
     except Exception as e:
         logger.error(f"Get time failed for timezone '{timezone}': {e}")
-        return json.dumps({"error": f"Invalid timezone format or failure: {e}"})
+        return json.dumps({"status": "error", "message": "Location not found"})
 
 async def get_weather(city: str, unit: str = "celsius") -> str:
     try:
@@ -213,7 +238,7 @@ async def get_weather(city: str, unit: str = "celsius") -> str:
             })
     except Exception as e:
         logger.error(f"Get weather failed for city '{city}': {e}")
-        return json.dumps({"error": f"Failed to fetch weather: {e}"})
+        return json.dumps({"error": "Failed to fetch weather."})
 
 async def search_chat_history(supabase: Client, session_id: str = "", query: str = "", limit: int = 5) -> str:
     try:
@@ -252,7 +277,7 @@ async def search_chat_history(supabase: Client, session_id: str = "", query: str
         return json.dumps({"results": results})
     except Exception as e:
         logger.error(f"Search chat history failed: {e}")
-        return json.dumps({"error": f"Database search failed: {e}"})
+        return json.dumps({"result": "Chat history is currently unavailable."})
 
 async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, session_id: str) -> str:
     if tool_name == "duckduckgo_search":
