@@ -46,12 +46,6 @@ alter table public.document_chunks force row level security;
 -- SELECT: a user may only read rows whose user_id matches their own JWT
 -- subject claim (auth.uid()). Rows belonging to other tenants are invisible,
 -- not just unwritable.
--- Dropped first so this script can be re-run safely: unlike CREATE TABLE/INDEX,
--- Postgres has no "CREATE POLICY IF NOT EXISTS", so re-running the bare
--- CREATE POLICY on a database where it already exists throws 42710 ("policy
--- already exists") and rolls back the entire script transaction — including
--- the GRANT statements below — which is why nothing appeared to "save".
-drop policy if exists "Users can view their own document chunks" on public.document_chunks;
 create policy "Users can view their own document chunks"
     on public.document_chunks
     for select
@@ -62,7 +56,6 @@ create policy "Users can view their own document chunks"
 -- The WITH CHECK clause is evaluated against the row being inserted, so a
 -- client cannot smuggle in another tenant's user_id even if it fabricates
 -- one in the payload.
-drop policy if exists "Users can insert their own document chunks" on public.document_chunks;
 create policy "Users can insert their own document chunks"
     on public.document_chunks
     for insert
@@ -72,13 +65,6 @@ create policy "Users can insert their own document chunks"
 -- Note: no UPDATE/DELETE policies are defined per the requirements above,
 -- so RLS denies both by default (rows are append-only / read-only for
 -- authenticated clients).
-
--- RLS policies only restrict which ROWS a role can touch — they do nothing
--- until the role already holds the base table privilege. Without this grant,
--- every request as `authenticated` fails with "permission denied for table
--- document_chunks" (Postgres error 42501) before RLS is ever evaluated.
-grant usage on schema public to authenticated;
-grant select, insert on public.document_chunks to authenticated;
 
 -- ============================================================================
 -- 4. match_document_chunks — RPC for similarity search
