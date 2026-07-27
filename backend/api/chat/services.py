@@ -1,12 +1,13 @@
 import json
 import logging
-from typing import AsyncGenerator, Callable, Awaitable
+from typing import AsyncGenerator, Callable, Awaitable, Optional
 from fastapi import HTTPException
 from supabase import Client
 from api.chat.schemas import Message, ProviderEnum
 from providers.factory import ProviderFactory
 from providers.base import BaseProvider
 from api.chat.tools import BASE_TOOLS, DUCKDUCKGO_SEARCH_TOOL, execute_tool
+from api.documents.services import get_relevant_context
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,21 @@ class ChatService:
 
 
     @staticmethod
+    def persist_message(supabase: Client, session_id: str, role: str, content: str, provider_name: Optional[str] = None) -> None:
+        """
+        Best-effort insert into `messages`. Failures are logged, not raised, so
+        a transient DB error while saving a user turn (or an upload
+        acknowledgement) never blocks response generation.
+        """
+        try:
+            row = {"session_id": session_id, "role": role, "content": content}
+            if provider_name:
+                row["provider_used"] = provider_name
+            supabase.table("messages").insert(row).execute()
+        except Exception as save_err:
+            logger.error(f"Failed to save {role} message for session {session_id}: {save_err}")
+
+    @staticmethod
     def get_provider(provider_enum: ProviderEnum) -> BaseProvider:
         try:
             return ProviderFactory.get_provider(provider_enum.value)
@@ -46,14 +62,53 @@ class ChatService:
             raise HTTPException(status_code=500, detail="AI Provider Initialization Error. Please check your configuration.")
 
     @staticmethod
+    async def _build_system_prompt(supabase: Client, user_id: Optional[str], user_message: str) -> Message:
+        """
+        Returns the base SYSTEM_PROMPT, or — when relevant chunks are found in
+        the user's uploaded documents — a new Message with a grounding context
+        section appended. Never mutates the shared SYSTEM_PROMPT singleton, since
+        that object is reused across every request. Retrieval failures (no
+        documents yet, Voyage/RPC errors) are swallowed and fall back to the
+        base prompt so RAG grounding is strictly additive, never a point of
+        failure for chat.
+        """
+        if not user_id or not user_message.strip():
+            return SYSTEM_PROMPT
+
+        try:
+            chunks = await get_relevant_context(supabase, user_message, user_id)
+        except Exception as context_err:
+            logger.warning(f"Document context retrieval failed, continuing without it: {context_err}")
+            return SYSTEM_PROMPT
+
+        if not chunks:
+            return SYSTEM_PROMPT
+
+        context_blocks = "\n\n".join(
+            f"[{i}] (source: {chunk.document_name})\n{chunk.chunk_text}"
+            for i, chunk in enumerate(chunks, 1)
+        )
+        grounded_content = (
+            f"{SYSTEM_PROMPT.content}\n\n"
+            "DOCUMENT CONTEXT: The user has uploaded documents. The following excerpts were "
+            "retrieved as potentially relevant to their latest message. Use them to answer "
+            "the question when relevant, citing sources with the [n] markers. If the context "
+            "does not answer the question, rely on your own knowledge instead of guessing. "
+            "Never mention that this context was retrieved or expose internal retrieval mechanics.\n\n"
+            f"Context:\n{context_blocks}"
+        )
+        return Message(role="system", content=grounded_content)
+
+    @staticmethod
     async def stream_chat(
-        provider_instance: BaseProvider, 
-        history: list[Message], 
-        supabase: Client, 
-        session_id: str, 
+        provider_instance: BaseProvider,
+        history: list[Message],
+        supabase: Client,
+        session_id: str,
         provider_name: str,
         request_is_disconnected: Callable[[], Awaitable[bool]],
-        use_web_search: bool = False
+        use_web_search: bool = False,
+        user_id: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         search_results_json = []
         active_tools = list(BASE_TOOLS)
@@ -65,10 +120,12 @@ class ChatService:
         if len(latest_user_message.strip()) < 5:
             active_tools = [t for t in active_tools if t.get("function", {}).get("name") != "search_chat_history"]
 
+        system_message = await ChatService._build_system_prompt(supabase, user_id, latest_user_message)
+
         if not history or history[0].role != "system":
-            history.insert(0, SYSTEM_PROMPT)
+            history.insert(0, system_message)
         else:
-            history[0] = SYSTEM_PROMPT
+            history[0] = system_message
 
         full_text = ""
         try:

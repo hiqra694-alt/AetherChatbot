@@ -12,3 +12,6 @@ pydantic==2.7.4
 pydantic-settings==2.3.4
 beautifulsoup4
 tzdata
+PyMuPDF
+voyageai
+python-multipart

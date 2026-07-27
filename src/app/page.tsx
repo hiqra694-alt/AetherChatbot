@@ -26,7 +26,9 @@ import {
   Moon,
   Globe,
   Edit2,
-  AlertTriangle
+  AlertTriangle,
+  Paperclip,
+  FileText
 } from 'lucide-react'
 
 interface UserProfile {
@@ -53,6 +55,7 @@ interface Message {
   content: string
   provider_used?: string
   sources?: Source[]
+  attachedFileName?: string
 }
 
 const PROVIDERS = [
@@ -92,10 +95,12 @@ export default function Dashboard() {
   const [editTitleText, setEditTitleText] = useState('')
   const [useWebSearch, setUseWebSearch] = useState(false)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
+  const [attachedFile, setAttachedFile] = useState<File | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const fetchSessions = async () => {
     setLoadingSessions(true)
@@ -213,6 +218,8 @@ export default function Dashboard() {
     setActiveSessionId(sessionId)
     setStreamingContent('')
     setIsStreaming(false)
+    setAttachedFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
     await fetchMessages(sessionId)
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
@@ -225,11 +232,36 @@ export default function Dashboard() {
     setStreamingContent('')
     setIsStreaming(false)
     setInputText('')
+    setAttachedFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
     setProviderDropdownOpen(false)  // always close any open dropdown
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
     }
     setTimeout(() => textareaRef.current?.focus(), 50)
+  }
+
+  const handleAttachButtonClick = () => {
+    fileInputRef.current?.click()
+    setPlusMenuOpen(false)
+  }
+
+  const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      if (file.type === 'application/pdf') {
+        setAttachedFile(file)
+      } else {
+        console.error('Only PDF files are supported.')
+      }
+    }
+    // Reset the input so selecting the same file again still fires onChange
+    e.target.value = ''
+  }
+
+  const handleRemoveAttachment = () => {
+    setAttachedFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleDeleteSessionClick = (e: React.MouseEvent, sessionId: string) => {
@@ -298,10 +330,13 @@ export default function Dashboard() {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!inputText.trim() || isStreaming) return
-
     const messageContent = inputText.trim()
+    if ((!messageContent && !attachedFile) || isStreaming) return
+
+    const fileToSend = attachedFile
     setInputText('')
+    setAttachedFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
     let currentSessionId = activeSessionId
@@ -309,7 +344,9 @@ export default function Dashboard() {
     try {
       // 1. Create a session if none is active
       if (!currentSessionId) {
-        const title = messageContent.length > 30 ? messageContent.slice(0, 30) + '...' : messageContent
+        const title = messageContent
+          ? (messageContent.length > 30 ? messageContent.slice(0, 30) + '...' : messageContent)
+          : `📄 ${fileToSend?.name}`
         const { data: newSession, error: sessionErr } = await supabase
           .from('chat_sessions')
           .insert({ title })
@@ -324,22 +361,18 @@ export default function Dashboard() {
         setSessions(prev => [newSession, ...prev])
       }
 
-      // 2. Insert User Message into DB
-      const { data: userMsg, error: msgErr } = await supabase
-        .from('messages')
-        .insert({
-          session_id: currentSessionId,
-          role: 'user',
-          content: messageContent,
-          provider_used: selectedProvider
-        })
-        .select()
-        .single()
-
-      if (msgErr) throw msgErr
-      if (userMsg) {
-        setMessages(prev => [...prev, { ...userMsg, content: userMsg.content }])
+      // 2. Optimistically render the user's turn locally. The backend now
+      // persists this message (and the upload marker, if a file was sent)
+      // into Supabase itself as part of the multipart /api/chat request
+      // below — inserting it here too would create duplicate rows.
+      const optimisticUserMsg: Message = {
+        id: `temp-user-${Date.now()}`,
+        role: 'user',
+        content: messageContent || `[Uploaded document: ${fileToSend?.name}]`,
+        provider_used: selectedProvider,
+        attachedFileName: fileToSend?.name
       }
+      setMessages(prev => [...prev, optimisticUserMsg])
 
       // 3. Trigger Streaming from Backend Proxy (using Supabase Auth JWT header)
       setIsStreaming(true)
@@ -350,17 +383,21 @@ export default function Dashboard() {
       const { data: { session } } = await supabase.auth.getSession()
       const token = session?.access_token || ''
 
+      const formData = new FormData()
+      formData.append('provider', selectedProvider)
+      formData.append('sessionId', currentSessionId as string)
+      formData.append('useWebSearch', String(useWebSearch))
+      if (messageContent) formData.append('message', messageContent)
+      if (fileToSend) formData.append('file', fileToSend)
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          // Do NOT set Content-Type here — the browser must generate the
+          // multipart boundary itself for a FormData body.
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({
-          provider: selectedProvider,
-          sessionId: currentSessionId,
-          useWebSearch: useWebSearch
-        })
+        body: formData
       })
 
       if (!response.ok) {
@@ -723,6 +760,7 @@ export default function Dashboard() {
                 const isUser = message.role === 'user'
                 const MsgIcon = isUser ? User : Bot
                 const providerObj = PROVIDERS.find(p => p.id === message.provider_used)
+                const uploadMarkerMatch = isUser ? message.content?.match(/^\[Uploaded document: (.+)\]$/) : null
 
                 return (
                   <div
@@ -732,7 +770,23 @@ export default function Dashboard() {
                     {isUser ? (
                       /* USER MESSAGE: Solid theme bubble */
                       <div className="bg-violet-600 text-white px-5 py-3.5 rounded-2xl rounded-tr-sm max-w-[85%] sm:max-w-[75%] shadow-sm text-sm whitespace-pre-wrap leading-relaxed">
-                        {message.content}
+                        {uploadMarkerMatch ? (
+                          /* File-only upload turn: show a clean attachment chip instead of raw marker text */
+                          <div className="flex items-center gap-2 text-violet-50">
+                            <FileText className="w-4 h-4 flex-shrink-0" />
+                            <span className="font-medium">{uploadMarkerMatch[1]}</span>
+                          </div>
+                        ) : (
+                          <>
+                            {message.attachedFileName && (
+                              <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-white/20 text-[11px] font-semibold text-violet-100">
+                                <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                                {message.attachedFileName}
+                              </div>
+                            )}
+                            {message.content}
+                          </>
+                        )}
                       </div>
                     ) : (
                       /* AI MESSAGE: Clean text with bot logo */
@@ -857,116 +911,159 @@ export default function Dashboard() {
         {/* Input Text Form Area */}
         <footer className="p-4 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent dark:from-slate-950 dark:via-slate-950 border-t border-slate-200/60 dark:border-slate-900 relative z-10">
           <div className="max-w-3xl mx-auto">
-            <form onSubmit={handleSendMessage} className="relative flex items-end gap-2 bg-white dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 focus-within:border-violet-400 dark:focus-within:border-slate-700/80 focus-within:ring-2 focus-within:ring-violet-500/5 dark:focus-within:ring-0 rounded-2xl p-2 transition-all shadow-sm">
-              <div className="relative flex-shrink-0 self-end mb-0.5 ml-1">
-                <button
-                  type="button"
-                  onClick={() => setPlusMenuOpen(!plusMenuOpen)}
-                  className={`p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer ${useWebSearch ? 'text-violet-500 bg-violet-50 dark:bg-violet-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
-                  title="Attachments & Tools"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
-                
-                {plusMenuOpen && (
-                  <>
-                    <div className="fixed inset-0 z-20 cursor-default" onClick={() => setPlusMenuOpen(false)} />
-                    <div className="absolute left-0 bottom-full mb-2 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-2 animate-fade-in">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUseWebSearch(!useWebSearch)
-                          setPlusMenuOpen(false)
-                        }}
-                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left cursor-pointer ${useWebSearch ? 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <Globe className="w-4 h-4" />
-                          <span>Web Search</span>
-                        </div>
-                        {useWebSearch && <Check className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-
-              <textarea
-                ref={textareaRef}
-                rows={1}
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    handleSendMessage(e)
-                  }
-                }}
-                disabled={isStreaming}
-                placeholder={isStreaming ? "Awaiting assistant response..." : `Message ${activeProvider.name}...`}
-                className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
+            <form onSubmit={handleSendMessage} className="relative flex flex-col gap-2 bg-white dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 focus-within:border-violet-400 dark:focus-within:border-slate-700/80 focus-within:ring-2 focus-within:ring-violet-500/5 dark:focus-within:ring-0 rounded-2xl p-2 transition-all shadow-sm">
+              {/* Hidden file input, restricted to PDFs, triggered by the "Attach PDF" menu item */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                onChange={handleFileSelected}
+                className="hidden"
               />
 
-              {/* Model Selector Dropdown - Re-located inside input container, on the right side */}
-              <div className="relative flex-shrink-0 self-end mb-0.5">
-                <button
-                  type="button"
-                  onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
-                >
-                  <ActiveProviderIcon className="w-4 h-4" />
-                  <span className="hidden sm:inline">{activeProvider.name}</span>
-                  <ChevronDown className="w-3.5 h-3.5 opacity-60" />
-                </button>
+              {/* Attachment Indicator - shown above the input row once a PDF is selected */}
+              {attachedFile && (
+                <div className="flex items-center gap-2 px-1">
+                  <div className="flex items-center gap-2 bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800/50 rounded-full pl-2.5 pr-1.5 py-1 text-xs font-medium text-violet-700 dark:text-violet-300 max-w-full">
+                    <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span className="truncate max-w-[220px]">{attachedFile.name}</span>
+                    <button
+                      type="button"
+                      onClick={handleRemoveAttachment}
+                      className="p-0.5 rounded-full hover:bg-violet-200/60 dark:hover:bg-violet-800/40 text-violet-500 dark:text-violet-400 transition-colors cursor-pointer"
+                      title="Remove attachment"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              )}
 
-                {providerDropdownOpen && (
-                  <>
-                    <div
-                      className="fixed inset-0 z-20 cursor-default"
-                      onClick={() => setProviderDropdownOpen(false)}
-                    />
+              <div className="flex items-end gap-2">
+                <div className="relative flex-shrink-0 self-end mb-0.5 ml-1">
+                  <button
+                    type="button"
+                    onClick={() => setPlusMenuOpen(!plusMenuOpen)}
+                    className={`p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer ${useWebSearch || attachedFile ? 'text-violet-500 bg-violet-50 dark:bg-violet-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                    title="Attachments & Tools"
+                  >
+                    <Plus className="w-5 h-5" />
+                  </button>
 
-                    <div className="absolute right-0 bottom-full mb-2 w-56 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
-                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-800 mb-1">
-                        Select Brain Engine
+                  {plusMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-20 cursor-default" onClick={() => setPlusMenuOpen(false)} />
+                      <div className="absolute left-0 bottom-full mb-2 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-2 animate-fade-in">
+                        <button
+                          type="button"
+                          onClick={handleAttachButtonClick}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left cursor-pointer ${attachedFile ? 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Paperclip className="w-4 h-4" />
+                            <span>Attach PDF</span>
+                          </div>
+                          {attachedFile && <Check className="w-4 h-4" />}
+                        </button>
+
+                        <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUseWebSearch(!useWebSearch)
+                            setPlusMenuOpen(false)
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left cursor-pointer ${useWebSearch ? 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Globe className="w-4 h-4" />
+                            <span>Web Search</span>
+                          </div>
+                          {useWebSearch && <Check className="w-4 h-4" />}
+                        </button>
                       </div>
-                      {PROVIDERS.map(p => {
-                        const Icon = p.icon
-                        const isSelected = p.id === selectedProvider
-                        return (
-                          <button
-                            key={p.id}
-                            type="button"
-                            onClick={() => {
-                              setSelectedProvider(p.id)
-                              setProviderDropdownOpen(false)
-                            }}
-                            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
-                                ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white font-bold'
-                                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                              }`}
-                          >
-                            <div className="flex items-center gap-2.5">
-                              <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : p.id === 'groq' ? 'text-blue-500' : 'text-slate-500'
-                                }`} />
-                              <span>{p.name}</span>
-                            </div>
-                            {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
+                    </>
+                  )}
+                </div>
 
-              <button
-                type="submit"
-                disabled={!inputText.trim() || isStreaming}
-                className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
-              >
-                <Send className="w-4 h-4" />
-              </button>
+                <textarea
+                  ref={textareaRef}
+                  rows={1}
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      handleSendMessage(e)
+                    }
+                  }}
+                  disabled={isStreaming}
+                  placeholder={isStreaming ? "Awaiting assistant response..." : `Message ${activeProvider.name}...`}
+                  className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
+                />
+
+                {/* Model Selector Dropdown - Re-located inside input container, on the right side */}
+                <div className="relative flex-shrink-0 self-end mb-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
+                  >
+                    <ActiveProviderIcon className="w-4 h-4" />
+                    <span className="hidden sm:inline">{activeProvider.name}</span>
+                    <ChevronDown className="w-3.5 h-3.5 opacity-60" />
+                  </button>
+
+                  {providerDropdownOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-20 cursor-default"
+                        onClick={() => setProviderDropdownOpen(false)}
+                      />
+
+                      <div className="absolute right-0 bottom-full mb-2 w-56 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
+                        <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-800 mb-1">
+                          Select Brain Engine
+                        </div>
+                        {PROVIDERS.map(p => {
+                          const Icon = p.icon
+                          const isSelected = p.id === selectedProvider
+                          return (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedProvider(p.id)
+                                setProviderDropdownOpen(false)
+                              }}
+                              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
+                                  ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white font-bold'
+                                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                                }`}
+                            >
+                              <div className="flex items-center gap-2.5">
+                                <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : p.id === 'groq' ? 'text-blue-500' : 'text-slate-500'
+                                  }`} />
+                                <span>{p.name}</span>
+                              </div>
+                              {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={(!inputText.trim() && !attachedFile) || isStreaming}
+                  className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
             </form>
             <p className="text-[10px] text-center text-slate-400 mt-2.5 font-medium">
               Secure Postgres chat storage. Streaming powered by FastAPI backend.

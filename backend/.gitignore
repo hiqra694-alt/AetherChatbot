@@ -24,9 +24,22 @@ __pycache__/
 dist/
 build/
 
+# Next.js / Node artifacts (in case any tooling is ever run from here)
+node_modules/
+.next/
+out/
+.turbo/
+
 # IDE
 .vscode/
 .idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Temporary screenshot dumps used during development
+reference/*.png
 
 # Logs
 *.log

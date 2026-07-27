@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+node_modules/
 /.pnp
 .pnp.*
 .yarn/*
@@ -16,13 +17,30 @@
 # next.js
 /.next/
 /out/
+.turbo/
 
 # production
 /build
+build/
 
 # misc
 .DS_Store
+Thumbs.db
 *.pem
+
+# IDE
+.vscode/
+.idea/
+
+# Python (in case any scripts/tooling are ever run from repo root)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
 
 # debug
 npm-debug.log*
@@ -46,3 +64,6 @@ past_themes.patch
 
 # Context / reference images
 context/
+
+# Temporary screenshot dumps used during development
+reference/*.png

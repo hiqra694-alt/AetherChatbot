@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", validation_alias=AliasChoices("openai_api_key", "OPENAI_API_KEY"))
     anthropic_api_key: str = Field("", validation_alias=AliasChoices("anthropic_api_key", "ANTHROPIC_API_KEY"))
     groq_api_key: str = Field("", validation_alias=AliasChoices("groq_api_key", "GROQ_API_KEY"))
-    
+    voyage_api_key: str = Field("", validation_alias=AliasChoices("voyage_api_key", "VOYAGE_API_KEY"))
+
     supabase_url: str = Field("", validation_alias=AliasChoices("supabase_url", "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"))
     supabase_anon_key: str = Field("", validation_alias=AliasChoices("supabase_anon_key", "SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY"))
 
