@@ -28,6 +28,14 @@ class DocumentListResponse(BaseModel):
     documents: List[DocumentMetadata] = Field(default_factory=list)
 
 
+class DocumentDeleteResponse(BaseModel):
+    """
+    Payload for DELETE /{document_name} — confirms how many chunks were removed.
+    """
+    document_name: str = Field(..., description="Name of the deleted document")
+    chunks_deleted: int = Field(..., description="Number of chunks removed from document_chunks")
+
+
 class RetrievedChunk(BaseModel):
     """
     A single chunk returned by a similarity search, ready to be injected into

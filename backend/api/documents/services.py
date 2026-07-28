@@ -1,7 +1,7 @@
 import logging
 import time
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 import fitz  # PyMuPDF
 import voyageai
@@ -228,10 +228,32 @@ async def process_and_store_pdf(supabase: Client, file_bytes: bytes, filename: s
     return len(rows)
 
 
-async def get_relevant_context(supabase: Client, query: str, user_id: str, top_k: int = 3) -> List[RetrievedChunk]:
+async def get_relevant_context(
+    supabase: Client,
+    query: str,
+    user_id: str,
+    top_k: int = 3,
+    document_name: Optional[str] = None,
+) -> List[RetrievedChunk]:
     """
     Embeds `query` and retrieves the top_k most similar chunks belonging to
     `user_id` via the `match_document_chunks` Supabase RPC function.
+
+    When `document_name` is given, it's passed through as `filter_document_name`
+    and applied inside the RPC's SQL WHERE clause — used right after a file is
+    attached in the same chat request so a generic prompt like "summarize the
+    pdf" is grounded in the document just uploaded, not whichever older
+    document happens to rank highest by embedding similarity. This MUST stay
+    a SQL-level filter rather than a post-hoc Python filter on the RPC's
+    results: match_count caps the similarity search at the top-N chunks
+    *before* any filtering, so a large document with many chunks (e.g.
+    attention_paper.pdf) can occupy every slot in that top-N window and leave
+    zero chunks for the newly attached document if filtering happens
+    afterward in Python. Filtering inside the WHERE clause means the LIMIT
+    is applied only after rows are already restricted to the requested
+    document, so that failure mode can't happen. When `document_name` is
+    None, `filter_document_name` is NULL and the RPC searches all of the
+    user's documents as normal.
 
     Exported so backend/api/chat/services.py can call this directly to
     ground chat responses in the user's uploaded documents, without either
@@ -245,7 +267,8 @@ async def get_relevant_context(supabase: Client, query: str, user_id: str, top_k
             "query_embedding": query_embedding,
             "match_threshold": DEFAULT_MATCH_THRESHOLD,
             "match_count": top_k,
-            "p_user_id": user_id,
+            "filter_user_id": user_id,
+            "filter_document_name": document_name,
         },
     ).execute()
 

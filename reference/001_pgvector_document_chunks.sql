@@ -71,16 +71,34 @@ create policy "Users can insert their own document chunks"
 -- ============================================================================
 -- Called from FastAPI via `supabase.rpc("match_document_chunks", {...})`.
 --
--- SECURITY DEFINER + explicit p_user_id filtering: this function is intended
--- to be invoked with the service role (bypassing the caller's RLS context),
--- so the p_user_id filter below is what enforces tenant isolation — it is
--- NOT optional and must always be supplied by the backend from a verified
--- JWT, never from unvalidated client input.
+-- SECURITY DEFINER + explicit filter_user_id filtering: this function is
+-- intended to be invoked with the service role (bypassing the caller's RLS
+-- context), so the filter_user_id filter below is what enforces tenant
+-- isolation — it is NOT optional and must always be supplied by the backend
+-- from a verified JWT, never from unvalidated client input.
+--
+-- filter_document_name scopes retrieval to a single document (e.g. the file
+-- just attached in the current chat request). It MUST be applied in the SQL
+-- WHERE clause rather than as a similarity-then-filter step in application
+-- code: match_count caps the similarity search at the top N chunks *before*
+-- any document filtering, so a large document with many chunks (e.g.
+-- attention_paper.pdf) can occupy every slot in that top-N window and leave
+-- zero chunks for the newly attached document once filtered client-side.
+-- Filtering inside the WHERE clause instead means the LIMIT is applied only
+-- after chunks are restricted to the requested document, so this failure
+-- mode can't happen.
+--
+-- Drop the old 4-arg overload first — `create or replace` cannot widen a
+-- function's argument list in place; without the drop, the old signature
+-- would linger as a second overload after this migration runs.
+drop function if exists public.match_document_chunks(vector, float, int, uuid);
+
 create or replace function public.match_document_chunks (
     query_embedding vector(512),
     match_threshold float,
     match_count int,
-    p_user_id uuid
+    filter_user_id uuid,
+    filter_document_name text default null
 )
 returns table (
     document_name text,
@@ -99,12 +117,13 @@ as $$
         -- score in [-1, 1] so callers can reason about it as "higher is better".
         1 - (dc.embedding <=> query_embedding) as similarity
     from public.document_chunks dc
-    where dc.user_id = p_user_id
+    where dc.user_id = filter_user_id
+      and (filter_document_name is null or dc.document_name = filter_document_name)
       and 1 - (dc.embedding <=> query_embedding) > match_threshold
     order by dc.embedding <=> query_embedding asc
     limit match_count;
 $$;
 
 -- Restrict execution to authenticated/service roles only.
-revoke all on function public.match_document_chunks(vector, float, int, uuid) from public;
-grant execute on function public.match_document_chunks(vector, float, int, uuid) to authenticated, service_role;
+revoke all on function public.match_document_chunks(vector, float, int, uuid, text) from public;
+grant execute on function public.match_document_chunks(vector, float, int, uuid, text) to authenticated, service_role;

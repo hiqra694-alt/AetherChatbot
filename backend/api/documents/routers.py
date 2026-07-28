@@ -5,7 +5,12 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from supabase import create_client, Client, ClientOptions
 
 from core.config import get_settings
-from api.documents.schemas import DocumentListResponse, DocumentMetadata, DocumentUploadResponse
+from api.documents.schemas import (
+    DocumentDeleteResponse,
+    DocumentListResponse,
+    DocumentMetadata,
+    DocumentUploadResponse,
+)
 from api.documents.services import process_and_store_pdf
 
 logger = logging.getLogger(__name__)
@@ -107,3 +112,35 @@ async def list_documents(auth: Tuple[Client, str] = Depends(get_authenticated_su
         documents[name].chunk_count += 1
 
     return DocumentListResponse(documents=list(documents.values()))
+
+
+@router.delete("/{document_name}", response_model=DocumentDeleteResponse)
+async def delete_document(
+    document_name: str,
+    auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
+):
+    """
+    Deletes every stored chunk for `document_name` belonging to the
+    authenticated user, revoking the AI's access to that document. RLS on
+    document_chunks already restricts deletes to the caller's own rows, but
+    the user_id filter is kept explicit here to match list_documents/upload.
+    """
+    supabase, user_id = auth
+
+    try:
+        res = (
+            supabase.table("document_chunks")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("document_name", document_name)
+            .execute()
+        )
+    except Exception as db_err:
+        logger.error(f"Failed to delete document '{document_name}' for user {user_id}: {db_err}")
+        raise HTTPException(status_code=500, detail="Failed to delete document. Please try again later.")
+
+    chunks_deleted = len(res.data or [])
+    if chunks_deleted == 0:
+        raise HTTPException(status_code=404, detail=f"Document '{document_name}' not found.")
+
+    return DocumentDeleteResponse(document_name=document_name, chunks_deleted=chunks_deleted)

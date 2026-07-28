@@ -122,7 +122,12 @@ async def chat_endpoint(
         provider_name=provider.value,
         request_is_disconnected=request.is_disconnected,
         use_web_search=useWebSearch,
-        user_id=user_id
+        user_id=user_id,
+        # Scope RAG retrieval to the file just attached in this request (if
+        # any), so a generic prompt like "summarize the pdf" is grounded in
+        # the newly uploaded document rather than an older one that happens
+        # to score higher on raw embedding similarity.
+        scoped_document_name=file.filename if file is not None else None
     )
 
     return StreamingResponse(generator, media_type="text/event-stream")

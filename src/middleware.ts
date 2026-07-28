@@ -3,14 +3,15 @@ import { updateSession } from '@/utils/supabase/middleware'
 
 export async function middleware(request: NextRequest) {
   const url = request.nextUrl
-  if (url.pathname === '/api/chat') {
+  const isBackendRoute = url.pathname === '/api/chat' || url.pathname === '/api/documents' || url.pathname.startsWith('/api/documents/')
+  if (isBackendRoute) {
     let backendBaseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_API_URL || 'http://127.0.0.1:8000'
     if (!/^https?:\/\//i.test(backendBaseUrl)) {
       backendBaseUrl = `https://${backendBaseUrl}`
     }
     backendBaseUrl = backendBaseUrl.replace(/\/$/, '')
-    const targetUrl = `${backendBaseUrl}/api/chat`
-    
+    const targetUrl = `${backendBaseUrl}${url.pathname}${url.search}`
+
     return NextResponse.rewrite(new URL(targetUrl))
   }
 
