@@ -2,10 +2,13 @@ import json
 import logging
 import httpx
 import urllib.parse
+from typing import Optional
 from bs4 import BeautifulSoup
 from datetime import datetime
 import zoneinfo
 from supabase import Client
+
+from api.documents.services import get_relevant_context
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,24 @@ SEARCH_CHAT_HISTORY_TOOL = {
                 }
             },
             "required": []
+        }
+    }
+}
+
+SEARCH_KNOWLEDGE_BASE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_knowledge_base",
+        "description": "Searches the user's private uploaded Knowledge Base (e.g. their CV, academic papers, or other uploaded documents). Use ONLY when the question explicitly refers to the user's own uploaded content (e.g. 'according to my CV', 'what does the document say', 'summarize my report'). Do NOT invoke for general knowledge, definitions, coding/technical concepts, or conversational questions you can already answer yourself (e.g. 'what is a REST API') — answer those directly instead.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to look up in the user's uploaded documents."
+                }
+            },
+            "required": ["query"]
         }
     }
 }
@@ -279,7 +300,34 @@ async def search_chat_history(supabase: Client, session_id: str = "", query: str
         logger.error(f"Search chat history failed: {e}")
         return json.dumps({"result": "Chat history is currently unavailable."})
 
-async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, session_id: str) -> str:
+async def search_knowledge_base(supabase: Client, user_id: Optional[str], query: str) -> str:
+    """
+    Agentic RAG entry point: only invoked when the model itself decides (via
+    a tool call) that the user's uploaded documents are relevant, rather than
+    running retrieval unconditionally on every turn. Searches across all of
+    the user's documents (document_name=None) since this path is for
+    conversational turns with no file attached in the current request.
+    """
+    if not user_id:
+        return json.dumps({"error": "No authenticated user to scope the knowledge base search to."})
+
+    try:
+        chunks = await get_relevant_context(supabase, query, user_id, document_name=None)
+    except Exception as search_err:
+        logger.error(f"search_knowledge_base failed for query '{query}': {search_err}")
+        return json.dumps({"error": "Failed to search the knowledge base."})
+
+    if not chunks:
+        return json.dumps({"result": "No relevant information found in the knowledge base."})
+
+    return "\n\n".join(
+        f"--- START OF CHUNK FROM: {chunk.document_name} ---\n"
+        f"{chunk.chunk_text}\n"
+        "--- END OF CHUNK ---"
+        for chunk in chunks
+    )
+
+async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, session_id: str, user_id: Optional[str] = None) -> str:
     if tool_name == "duckduckgo_search":
         return await duckduckgo_search(tool_args.get("search_query", ""))
     elif tool_name == "calculator":
@@ -290,5 +338,7 @@ async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, sessio
         return await get_weather(tool_args.get("city", ""), tool_args.get("unit", "celsius"))
     elif tool_name == "search_chat_history":
         return await search_chat_history(supabase, session_id, tool_args.get("query", ""), tool_args.get("limit", 5))
+    elif tool_name == "search_knowledge_base":
+        return await search_knowledge_base(supabase, user_id, tool_args.get("query", ""))
     else:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})

@@ -1,0 +1,198 @@
+[
+  {
+    "id": "eval_001",
+    "query": "Who are the authors of the paper 'Attention Is All You Need'?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "Ashish Vaswani∗ Google Brain avaswani@google.com",
+    "ground_truth_answer": "Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and Illia Polosukhin."
+  },
+  {
+    "id": "eval_002",
+    "query": "What BLEU score does the model achieve on the WMT 2014 English-to-German translation task?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "Our model achieves 28.4 BLEU on the WMT 2014 English- to-German translation task",
+    "ground_truth_answer": "28.4 BLEU"
+  },
+  {
+    "id": "eval_003",
+    "query": "What BLEU score does the Transformer achieve on the WMT 2014 English-to-French translation task, and how long did it train?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "new single-model state-of-the-art BLEU score of 41.8 after training for 3.5 days on eight GPUs",
+    "ground_truth_answer": "41.8 BLEU, after training for 3.5 days on eight GPUs"
+  },
+  {
+    "id": "eval_004",
+    "query": "What new network architecture does the paper propose?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely",
+    "ground_truth_answer": "The Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely."
+  },
+  {
+    "id": "eval_005",
+    "query": "How many identical layers make up the Transformer's encoder?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "Encoder: The encoder is composed of a stack of N = 6 identical layers",
+    "ground_truth_answer": "6 identical layers (N = 6)"
+  },
+  {
+    "id": "eval_006",
+    "query": "What is the dimensionality (dmodel) of the Transformer's sub-layer and embedding outputs?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "all sub-layers in the model, as well as the embedding layers, produce outputs of dimension dmodel = 512",
+    "ground_truth_answer": "512"
+  },
+  {
+    "id": "eval_007",
+    "query": "How many parallel attention heads (h) does the Transformer use?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "In this work we employ h = 8 parallel attention layers, or heads",
+    "ground_truth_answer": "8 attention heads"
+  },
+  {
+    "id": "eval_008",
+    "query": "What optimizer and beta parameters were used to train the Transformer?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "We used the Adam optimizer [20] with β1 = 0.9, β2 = 0.98 and ϵ = 10−9",
+    "ground_truth_answer": "The Adam optimizer, with β1 = 0.9, β2 = 0.98, and ϵ = 10⁻⁹"
+  },
+  {
+    "id": "eval_009",
+    "query": "How many warmup steps were used for the learning rate schedule?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "We used warmup_steps = 4000",
+    "ground_truth_answer": "4000 warmup steps"
+  },
+  {
+    "id": "eval_010",
+    "query": "What hardware did the researchers use to train the Transformer models?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "We trained our models on one machine with 8 NVIDIA P100 GPUs",
+    "ground_truth_answer": "One machine with 8 NVIDIA P100 GPUs"
+  },
+  {
+    "id": "eval_011",
+    "query": "How many steps and how long were the big Transformer models trained for?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "The big models were trained for 300,000 steps (3.5 days)",
+    "ground_truth_answer": "300,000 steps, or 3.5 days"
+  },
+  {
+    "id": "eval_012",
+    "query": "What dropout rate (Pdrop) is used for the base model?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "For the base model, we use a rate of Pdrop = 0.1",
+    "ground_truth_answer": "0.1"
+  },
+  {
+    "id": "eval_013",
+    "query": "What value of label smoothing was used during training?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "we employed label smoothing of value ϵls = 0.1",
+    "ground_truth_answer": "ϵls = 0.1"
+  },
+  {
+    "id": "eval_014",
+    "query": "What dataset was used for the English-to-German translation training, and how many sentence pairs did it contain?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "We trained on the standard WMT 2014 English-German dataset consisting of about 4.5 million sentence pairs",
+    "ground_truth_answer": "The WMT 2014 English-German dataset, consisting of about 4.5 million sentence pairs"
+  },
+  {
+    "id": "eval_015",
+    "query": "At which conference was the Transformer paper presented?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA",
+    "ground_truth_answer": "The 31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA"
+  },
+  {
+    "id": "eval_016",
+    "query": "What is the formula for Scaled Dot-Product Attention in the paper?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "Attention(Q, K, V ) = softmax(QKT √dk )V",
+    "ground_truth_answer": "Attention(Q, K, V) = softmax(QK^T / √dk) V"
+  },
+  {
+    "id": "eval_017",
+    "query": "What is the inner-layer dimensionality (dff) of the position-wise feed-forward networks?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "The dimensionality of input and output is dmodel = 512, and the inner-layer has dimensionality dff = 2048",
+    "ground_truth_answer": "2048"
+  },
+  {
+    "id": "eval_018",
+    "query": "What corpus was used to evaluate the Transformer on English constituency parsing, and how many training sentences did it contain?",
+    "expected_document": "attention_paper.pdf",
+    "expected_chunk_text": "We trained a 4-layer transformer with dmodel = 1024 on the Wall Street Journal (WSJ) portion of the Penn Treebank [25], about 40K training sentences",
+    "ground_truth_answer": "The Wall Street Journal (WSJ) portion of the Penn Treebank, about 40K training sentences"
+  },
+  {
+    "id": "eval_019",
+    "query": "What email address is listed on Iqra Hameed's CV?",
+    "expected_document": "IQRA HAMEED_CV.pdf",
+    "expected_chunk_text": "IQRA HAMEED Punjab,Pakistan • ah5456387@gmail.com",
+    "ground_truth_answer": "ah5456387@gmail.com"
+  },
+  {
+    "id": "eval_020",
+    "query": "What is Iqra Hameed's current job title and employer?",
+    "expected_document": "IQRA HAMEED_CV.pdf",
+    "expected_chunk_text": "TXYBER SOLUTIONS Punjab, Pakistan Learning and development Assistant 2025-Present",
+    "ground_truth_answer": "Learning and development Assistant at TXYBER SOLUTIONS, Punjab, Pakistan, 2025-Present"
+  },
+  {
+    "id": "eval_021",
+    "query": "What is the title of Iqra Hameed's published research paper on human behavior recognition?",
+    "expected_document": "IQRA HAMEED_CV.pdf",
+    "expected_chunk_text": "A Human Behavior Recognition System for Smart Energy and Resource Optimization Using Deep Learning to Encourage Sustainable Habits in Smart Cities.",
+    "ground_truth_answer": "A Human Behavior Recognition System for Smart Energy and Resource Optimization Using Deep Learning to Encourage Sustainable Habits in Smart Cities."
+  },
+  {
+    "id": "eval_022",
+    "query": "What is the DOI link for Iqra Hameed's published research?",
+    "expected_document": "IQRA HAMEED_CV.pdf",
+    "expected_chunk_text": "DOI LINK: https://doi.org/10.5281/zenodo.17637585",
+    "ground_truth_answer": "https://doi.org/10.5281/zenodo.17637585"
+  },
+  {
+    "id": "eval_023",
+    "query": "What is Iqra Hameed's CGPA at the University of Gujrat?",
+    "expected_document": "IQRA HAMEED_CV.pdf",
+    "expected_chunk_text": "CGPA: 3.9 / 4.0 (Top academic standing)",
+    "ground_truth_answer": "3.9 / 4.0 (Top academic standing)"
+  },
+  {
+    "id": "eval_024",
+    "query": "What is the name of Iqra Hameed's capstone project?",
+    "expected_document": "IQRA HAMEED_CV.pdf",
+    "expected_chunk_text": "Capston Project (In Progress): SwimAI – Intelligent Swimming Club Management & Pool Monitoring System",
+    "ground_truth_answer": "SwimAI – Intelligent Swimming Club Management & Pool Monitoring System"
+  },
+  {
+    "id": "eval_025",
+    "query": "According to the IAPS version of her CV, what research interests does Iqra Hameed describe herself as having?",
+    "expected_document": "IQRA HAMEED_IAPS_CV.pdf",
+    "expected_chunk_text": "AI-focused computer science researcher with strong interests in deep learning, human behavior recognition, and sustainability-driven smart systems.",
+    "ground_truth_answer": "Deep learning, human behavior recognition, and sustainability-driven smart systems."
+  },
+  {
+    "id": "eval_026",
+    "query": "What phone number is listed on Iqra Hameed's IAPS CV?",
+    "expected_document": "IQRA HAMEED_IAPS_CV.pdf",
+    "expected_chunk_text": "IQRA HAMEED Punjab,Pakistan • ah5456387@gmail.com • +923217744760",
+    "ground_truth_answer": "+923217744760"
+  },
+  {
+    "id": "eval_027",
+    "query": "What is Iqra Hameed's LinkedIn and Google Scholar profile listed on her IAPS CV?",
+    "expected_document": "IQRA HAMEED_IAPS_CV.pdf",
+    "expected_chunk_text": "www.linkedin.com/in/iqra-hameed- Google Scholar: https://scholar.google.com/citations?user=9q1KXgoAAAAJ",
+    "ground_truth_answer": "LinkedIn: www.linkedin.com/in/iqra-hameed- ; Google Scholar: https://scholar.google.com/citations?user=9q1KXgoAAAAJ"
+  },
+  {
+    "id": "eval_028",
+    "query": "What degree program is Iqra Hameed pursuing at the University of Gujrat, per her IAPS CV?",
+    "expected_document": "IQRA HAMEED_IAPS_CV.pdf",
+    "expected_chunk_text": "UNIVERSITY OF GUJRAT​ Punjab, Pakistan Bachelor of Science in Computer Science (BSCS)",
+    "ground_truth_answer": "Bachelor of Science in Computer Science (BSCS)"
+  }
+]

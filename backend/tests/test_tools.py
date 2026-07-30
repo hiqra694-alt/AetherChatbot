@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.chat.tools import search_chat_history, SEARCH_CHAT_HISTORY_TOOL, execute_tool
+from api.chat.tools import search_chat_history, SEARCH_CHAT_HISTORY_TOOL, SEARCH_KNOWLEDGE_BASE_TOOL, execute_tool
 
 @pytest.mark.asyncio
 async def test_search_chat_history_tool_schema():
@@ -102,3 +102,31 @@ async def test_execute_tool_dispatcher():
     res = await execute_tool("search_chat_history", {}, mock_supabase, "sess_1")
     parsed = json.loads(res)
     assert "result" in parsed
+
+@pytest.mark.asyncio
+async def test_search_knowledge_base_tool_schema():
+    assert SEARCH_KNOWLEDGE_BASE_TOOL["function"]["name"] == "search_knowledge_base"
+    assert SEARCH_KNOWLEDGE_BASE_TOOL["function"]["parameters"]["required"] == ["query"]
+    assert "Knowledge Base" in SEARCH_KNOWLEDGE_BASE_TOOL["function"]["description"]
+
+@pytest.mark.asyncio
+async def test_execute_tool_dispatcher_search_knowledge_base(monkeypatch):
+    async def fake_get_relevant_context(supabase, query, user_id, top_k=3, document_name=None):
+        assert query == "SwimAI project"
+        assert user_id == "user-123"
+        assert document_name is None
+        return []
+
+    monkeypatch.setattr("api.chat.tools.get_relevant_context", fake_get_relevant_context)
+
+    mock_supabase = MagicMock()
+    res = await execute_tool("search_knowledge_base", {"query": "SwimAI project"}, mock_supabase, "sess_1", "user-123")
+    parsed = json.loads(res)
+    assert "No relevant information found" in parsed["result"]
+
+@pytest.mark.asyncio
+async def test_execute_tool_dispatcher_search_knowledge_base_no_user_id():
+    mock_supabase = MagicMock()
+    res = await execute_tool("search_knowledge_base", {"query": "SwimAI project"}, mock_supabase, "sess_1")
+    parsed = json.loads(res)
+    assert "error" in parsed

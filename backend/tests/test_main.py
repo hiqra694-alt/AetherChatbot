@@ -42,8 +42,9 @@ def _make_mock_supabase():
 @patch("api.chat.services.get_relevant_context")
 @patch("api.chat.routers.create_client")
 def test_chat_endpoint_mock_provider(mock_create_client, mock_get_relevant_context):
-    # Stub out document context retrieval so RAG grounding doesn't make a
-    # real network call to the Voyage AI API during this test.
+    # No file attached in this request (agentic Branch B), and MockProvider
+    # never emits a tool call, so RAG retrieval must never fire — it's only
+    # triggered if the model itself calls the search_knowledge_base tool.
     mock_create_client.return_value = _make_mock_supabase()
     mock_get_relevant_context.return_value = []
 
@@ -59,7 +60,7 @@ def test_chat_endpoint_mock_provider(mock_create_client, mock_get_relevant_conte
     body = response.text
     assert "data:" in body
     assert "[DONE]" in body
-    mock_get_relevant_context.assert_called_once()
+    mock_get_relevant_context.assert_not_called()
 
 def test_chat_endpoint_unauthorized():
     response = client.post(
