@@ -53,7 +53,6 @@ async def chat_endpoint(
     request: Request,
     provider: ProviderEnum = Form(...),
     sessionId: str = Form(...),
-    useWebSearch: bool = Form(False),
     message: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
@@ -121,7 +120,6 @@ async def chat_endpoint(
         session_id=sessionId,
         provider_name=provider.value,
         request_is_disconnected=request.is_disconnected,
-        use_web_search=useWebSearch,
         user_id=user_id,
         # Scope RAG retrieval to the file just attached in this request (if
         # any), so a generic prompt like "summarize the pdf" is grounded in

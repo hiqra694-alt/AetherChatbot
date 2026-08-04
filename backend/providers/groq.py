@@ -5,6 +5,33 @@ from providers.base import BaseProvider
 from core.config import get_settings
 from api.chat.schemas import Message
 
+# Literal identifiers of every tool ever offered to the model (see
+# api/chat/tools.py). These are snake_case function identifiers that never
+# legitimately appear in ordinary prose, so redacting an exact match is a
+# precise, low-false-positive safety net against the model naming an
+# internal tool out loud — SYSTEM_PROMPT is the primary defense (it
+# explicitly forbids narrating tool use), this just catches the rare case
+# where a small model does it anyway.
+#
+# A prior version of this filter tried to also catch free-form narration
+# ("I will use the X tool", "no tool applies", etc.) by buffering entire
+# sentences and dropping any sentence that matched. That caused a real
+# regression: dropping a whole sentence destroys any real answer content
+# that happened to share it with the flagged phrase (e.g. a single run-on
+# sentence listing real filenames that also mentioned a tool name lost the
+# filenames too), and holding output until each sentence boundary made
+# streaming visibly chunkier. Redacting only the exact matched substring,
+# on the same per-chunk cadence as the tag-stripping below, avoids both
+# problems.
+_TOOL_NAME_PATTERN = re.compile(
+    r'\b(?:' + '|'.join(re.escape(n) for n in [
+        "search_knowledge_base", "list_documents", "duckduckgo_search",
+        "calculator", "get_current_time", "get_weather", "search_chat_history",
+    ]) + r')\b',
+    re.IGNORECASE,
+)
+
+
 class GroqProvider(BaseProvider):
     def __init__(self):
         settings = get_settings()
@@ -28,7 +55,7 @@ class GroqProvider(BaseProvider):
             formatted_messages.append(msg)
             
         kwargs = {
-            "model": "llama-3.1-8b-instant",
+            "model": "llama-3.3-70b-versatile",
             "messages": formatted_messages,
             "stream": True
         }
@@ -95,13 +122,19 @@ class GroqProvider(BaseProvider):
                             
                     if is_prefix:
                         continue
-                        
+
+                    # 5. Redact exact internal tool-name mentions, then release
+                    # immediately — no sentence-boundary holding, so streaming
+                    # stays near-real-time.
+                    buffer = _TOOL_NAME_PATTERN.sub('', buffer)
+
                     yield buffer
                     buffer = ""
 
         if buffer:
             buffer = re.sub(r'<?function=.*$', '', buffer, flags=re.DOTALL | re.IGNORECASE)
             buffer = re.sub(r'<?tool_call.*$', '', buffer, flags=re.DOTALL | re.IGNORECASE)
+            buffer = _TOOL_NAME_PATTERN.sub('', buffer)
             if buffer:
                 yield buffer
 

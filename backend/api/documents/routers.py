@@ -8,10 +8,9 @@ from core.config import get_settings
 from api.documents.schemas import (
     DocumentDeleteResponse,
     DocumentListResponse,
-    DocumentMetadata,
     DocumentUploadResponse,
 )
-from api.documents.services import process_and_store_pdf
+from api.documents.services import list_user_documents, process_and_store_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -93,25 +92,12 @@ async def list_documents(auth: Tuple[Client, str] = Depends(get_authenticated_su
     supabase, user_id = auth
 
     try:
-        res = (
-            supabase.table("document_chunks")
-            .select("document_name, created_at")
-            .eq("user_id", user_id)
-            .order("created_at")
-            .execute()
-        )
+        documents = await list_user_documents(supabase, user_id)
     except Exception as db_err:
         logger.error(f"Failed to list documents for user {user_id}: {db_err}")
         raise HTTPException(status_code=500, detail="Failed to fetch documents. Please try again later.")
 
-    documents: dict[str, DocumentMetadata] = {}
-    for row in res.data or []:
-        name = row["document_name"]
-        if name not in documents:
-            documents[name] = DocumentMetadata(document_name=name, chunk_count=0, created_at=row["created_at"])
-        documents[name].chunk_count += 1
-
-    return DocumentListResponse(documents=list(documents.values()))
+    return DocumentListResponse(documents=documents)
 
 
 @router.delete("/{document_name}", response_model=DocumentDeleteResponse)

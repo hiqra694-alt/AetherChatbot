@@ -49,7 +49,6 @@ async def test_system_prompt_insertion_empty_history():
         session_id="test_sess",
         provider_name="mock",
         request_is_disconnected=request_is_disconnected,
-        use_web_search=False
     ):
         chunks.append(chunk)
 
@@ -75,7 +74,6 @@ async def test_system_prompt_insertion_existing_history():
         session_id="test_sess",
         provider_name="mock",
         request_is_disconnected=request_is_disconnected,
-        use_web_search=False
     ):
         chunks.append(chunk)
 
@@ -113,7 +111,6 @@ async def test_stream_chat_scopes_rag_to_uploaded_document(monkeypatch):
         session_id="test_sess",
         provider_name="mock",
         request_is_disconnected=request_is_disconnected,
-        use_web_search=False,
         user_id="user-123",
         scoped_document_name="IQRA HAMEED_CV.pdf"
     ):
@@ -147,7 +144,6 @@ async def test_stream_chat_no_file_offers_knowledge_base_tool_without_auto_retri
         session_id="test_sess",
         provider_name="mock",
         request_is_disconnected=request_is_disconnected,
-        use_web_search=False,
         user_id="user-123"
     ):
         pass
@@ -175,7 +171,6 @@ async def test_stream_chat_with_file_passes_no_tools():
         session_id="test_sess",
         provider_name="mock",
         request_is_disconnected=request_is_disconnected,
-        use_web_search=False,
         user_id="user-123",
         scoped_document_name="IQRA HAMEED_CV.pdf"
     ):
@@ -226,7 +221,6 @@ async def test_stream_chat_agentic_tool_call_triggers_knowledge_base_search(monk
         session_id="test_sess",
         provider_name="mock",
         request_is_disconnected=request_is_disconnected,
-        use_web_search=False,
         user_id="user-123"
     ):
         chunks.append(chunk)

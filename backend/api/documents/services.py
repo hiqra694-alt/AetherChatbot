@@ -11,7 +11,7 @@ from rank_bm25 import BM25Okapi
 from supabase import Client
 
 from core.config import get_settings
-from api.documents.schemas import RetrievedChunk
+from api.documents.schemas import DocumentMetadata, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -402,3 +402,50 @@ async def get_relevant_context(
         )
         for row in rows
     ]
+
+
+async def list_user_documents(supabase: Client, user_id: str) -> List[DocumentMetadata]:
+    """
+    Lists the distinct documents a user has stored, aggregated from
+    document_chunks (chunk_count + earliest created_at per document_name).
+    Shared by the deterministic GET /api/documents endpoint and the chat
+    agent's list_documents tool, so both surfaces answer "what documents do
+    you have" from the same real, RLS-scoped rows instead of the chat path
+    inferring an answer from a lossy top-k semantic search over
+    search_knowledge_base.
+    """
+    res = (
+        supabase.table("document_chunks")
+        .select("document_name, created_at")
+        .eq("user_id", user_id)
+        .order("created_at")
+        .execute()
+    )
+
+    documents: Dict[str, DocumentMetadata] = {}
+    for row in res.data or []:
+        name = row["document_name"]
+        if name not in documents:
+            documents[name] = DocumentMetadata(document_name=name, chunk_count=0, created_at=row["created_at"])
+        documents[name].chunk_count += 1
+
+    return list(documents.values())
+
+
+def format_retrieved_chunks(chunks: List[RetrievedChunk]) -> str:
+    """
+    Renders retrieved chunks for injection into LLM context (system prompt or
+    tool result). Uses XML-style tags rather than a '---'-delimited wrapper
+    because the SYSTEM_PROMPT separately instructs the model to end
+    user-facing answers with a '---'-delimited source footer — sharing that
+    delimiter between the internal context wrapper and the instructed
+    user-facing format let a weak model conflate the two and echo the raw
+    wrapper (with all retrieved document names) straight into its reply
+    instead of synthesizing a clean answer.
+    """
+    return "\n\n".join(
+        f'<retrieved_context source="{chunk.document_name}">\n'
+        f"{chunk.chunk_text}\n"
+        "</retrieved_context>"
+        for chunk in chunks
+    )

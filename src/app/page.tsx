@@ -24,7 +24,6 @@ import {
   Cpu,
   Sun,
   Moon,
-  Globe,
   Edit2,
   AlertTriangle,
   Paperclip,
@@ -100,7 +99,6 @@ export default function Dashboard() {
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null)
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
   const [editTitleText, setEditTitleText] = useState('')
-  const [useWebSearch, setUseWebSearch] = useState(false)
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [attachedFile, setAttachedFile] = useState<File | null>(null)
   const [showKnowledgeBase, setShowKnowledgeBase] = useState(false)
@@ -447,7 +445,6 @@ export default function Dashboard() {
       const formData = new FormData()
       formData.append('provider', selectedProvider)
       formData.append('sessionId', currentSessionId as string)
-      formData.append('useWebSearch', String(useWebSearch))
       if (messageContent) formData.append('message', messageContent)
       if (fileToSend) formData.append('file', fileToSend)
 
@@ -552,15 +549,21 @@ export default function Dashboard() {
         }
       }
 
-      if (streamError) {
-        throw new Error(streamError)
-      }
+      // A streamError from the backend (e.g. Groq failed to format a tool
+      // call) means generation was cut short mid-response, not that nothing
+      // happened — `streamedContent` may already hold real, valid text the
+      // user has been watching stream in. Append an inline notice instead of
+      // throwing, so that partial answer is preserved rather than replaced
+      // wholesale by an error bubble.
+      const finalContent = streamError
+        ? `${streamedContent}${streamedContent.trim() ? '\n\n' : ''}⚠️ *The agent encountered an error formatting its response. Please try again.*`
+        : streamedContent
 
       // 4. Once streaming is complete, append the assistant response to messages state
       const mockAssistantMsg: Message = {
         id: Math.random().toString(),
         role: 'assistant',
-        content: streamedContent,
+        content: finalContent,
         provider_used: selectedProvider,
         sources: streamedSources || undefined
       }
@@ -884,18 +887,11 @@ export default function Dashboard() {
                               place instead of a second bubble/avatar below it. */}
                           {!message.content && isLoading ? (
                             <div className="flex items-center gap-2 pt-1 text-slate-400 dark:text-slate-500">
-                              {useWebSearch ? (
-                                <>
-                                  <Globe className="w-4 h-4 animate-spin" style={{ animationDuration: '3s' }} />
-                                  <span className="text-xs font-medium animate-pulse">Researching the web...</span>
-                                </>
-                              ) : (
-                                <div className="flex items-center gap-1.5">
-                                  <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-                                  <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-                                  <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '300ms' }} />
-                                </div>
-                              )}
+                              <div className="flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                              </div>
                             </div>
                           ) : (
                             <div className="text-[15px] leading-relaxed select-text break-words [&>p]:mb-4 [&>ul]:list-disc [&>ul]:ml-5 [&>ol]:list-decimal [&>ol]:ml-5 [&>ul]:mb-4 [&>ol]:mb-4 [&>ul>li]:mb-1 [&>ol>li]:mb-1 [&_code]:bg-slate-200/50 [&_code]:dark:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_pre]:bg-slate-900 [&_pre]:text-slate-50 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:my-4 [&_pre]:overflow-x-auto [&_a]:text-violet-600 [&_a]:dark:text-violet-400 [&_a]:font-medium [&_a]:hover:underline text-slate-800 dark:text-slate-200">
@@ -992,7 +988,7 @@ export default function Dashboard() {
                     type="button"
                     onClick={() => setPlusMenuOpen(!plusMenuOpen)}
                     disabled={isStreaming}
-                    className={`p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent ${useWebSearch || attachedFile ? 'text-violet-500 bg-violet-50 dark:bg-violet-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                    className={`p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent ${attachedFile ? 'text-violet-500 bg-violet-50 dark:bg-violet-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
                     title="Attachments & Tools"
                   >
                     <Plus className="w-5 h-5" />
@@ -1012,23 +1008,6 @@ export default function Dashboard() {
                             <span>Attach PDF</span>
                           </div>
                           {attachedFile && <Check className="w-4 h-4" />}
-                        </button>
-
-                        <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setUseWebSearch(!useWebSearch)
-                            setPlusMenuOpen(false)
-                          }}
-                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left cursor-pointer ${useWebSearch ? 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <Globe className="w-4 h-4" />
-                            <span>Web Search</span>
-                          </div>
-                          {useWebSearch && <Check className="w-4 h-4" />}
                         </button>
                       </div>
                     </>

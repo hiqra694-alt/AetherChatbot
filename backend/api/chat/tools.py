@@ -8,7 +8,7 @@ from datetime import datetime
 import zoneinfo
 from supabase import Client
 
-from api.documents.services import get_relevant_context
+from api.documents.services import format_retrieved_chunks, get_relevant_context, list_user_documents
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,20 @@ DUCKDUCKGO_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "duckduckgo_search",
-        "description": "Search the web for up-to-date information. Use this when the user asks about current events, real-time data, or facts you do not know.",
+        "description": (
+            "Searches the live web. Defines an epistemic boundary: only call this when your own "
+            "knowledge is genuinely insufficient or unreliable for the question, not as a default "
+            "first step. "
+            "WHEN TO USE: (1) real-time or time-sensitive external data — news, current events, "
+            "weather, prices, scores, or anything that can change after your training cutoff; "
+            "(2) an acronym, term, or name that is genuinely ambiguous or niche, where you are not "
+            "confident which of several plausible meanings applies (e.g. it could refer to a "
+            "company/product/brand as easily as a technical concept) and answering without checking "
+            "would risk guessing. "
+            "WHEN NOT TO USE: do NOT call this for foundational computer science or technical "
+            "concepts, well-established definitions, or general knowledge you already know with "
+            "confidence — answer those directly from your own knowledge instead."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -124,6 +137,19 @@ SEARCH_KNOWLEDGE_BASE_TOOL = {
                 }
             },
             "required": ["query"]
+        }
+    }
+}
+
+LIST_DOCUMENTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_documents",
+        "description": "Lists the exact names of every document the user has uploaded to their Knowledge Base. Use this whenever the user asks what documents/files you have access to, or which documents they've uploaded. Do NOT use search_knowledge_base for this — it only returns a partial, similarity-ranked set of chunks and cannot reliably enumerate every uploaded document.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }
 }
@@ -320,12 +346,32 @@ async def search_knowledge_base(supabase: Client, user_id: Optional[str], query:
     if not chunks:
         return json.dumps({"result": "No relevant information found in the knowledge base."})
 
-    return "\n\n".join(
-        f"--- START OF CHUNK FROM: {chunk.document_name} ---\n"
-        f"{chunk.chunk_text}\n"
-        "--- END OF CHUNK ---"
-        for chunk in chunks
-    )
+    return format_retrieved_chunks(chunks)
+
+async def list_documents(supabase: Client, user_id: Optional[str]) -> str:
+    """
+    Deterministic enumeration of the user's uploaded documents, backed by the
+    same list_user_documents() query as GET /api/documents (RLS + explicit
+    user_id-scoped). Exists so "what documents do you have access to?" is
+    answered from real rows instead of the model inferring/completing a list
+    from a lossy top-k semantic search, which is what previously produced
+    hallucinated filenames.
+    """
+    if not user_id:
+        return json.dumps({"error": "No authenticated user to scope the document list to."})
+
+    try:
+        documents = await list_user_documents(supabase, user_id)
+    except Exception as list_err:
+        logger.error(f"list_documents failed for user {user_id}: {list_err}")
+        return json.dumps({"error": "Failed to list documents."})
+
+    if not documents:
+        return json.dumps({"result": "No documents have been uploaded yet."})
+
+    return json.dumps({
+        "documents": [doc.document_name for doc in documents]
+    })
 
 async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, session_id: str, user_id: Optional[str] = None) -> str:
     if tool_name == "duckduckgo_search":
@@ -340,5 +386,7 @@ async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, sessio
         return await search_chat_history(supabase, session_id, tool_args.get("query", ""), tool_args.get("limit", 5))
     elif tool_name == "search_knowledge_base":
         return await search_knowledge_base(supabase, user_id, tool_args.get("query", ""))
+    elif tool_name == "list_documents":
+        return await list_documents(supabase, user_id)
     else:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
