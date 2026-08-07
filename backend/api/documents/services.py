@@ -299,15 +299,19 @@ def _hybrid_rerank(query: str, rows: List[dict], top_k: int) -> List[dict]:
 # Public service functions
 # ==================================================
 
-async def process_and_store_pdf(supabase: Client, file_bytes: bytes, filename: str, user_id: str) -> int:
+async def process_and_store_pdf(supabase: Client, file_bytes: bytes, filename: str, user_id: str, session_id: str) -> int:
     """
     Parses an in-memory PDF, chunks it with the recursive-merge strategy,
     embeds the chunks with Voyage AI (voyage-3-lite), and inserts them into
-    `document_chunks` scoped to `user_id`.
+    `document_chunks` scoped to `user_id` AND `session_id`.
 
     `supabase` must be a client authenticated with the user's JWT — the
     document_chunks RLS INSERT policy requires auth.uid() = user_id, so an
     unauthenticated/anon client will be rejected by Postgres.
+
+    `session_id` ties every stored chunk to the chat session it was uploaded
+    in (Context Isolation): a document uploaded in one chat is never visible
+    to retrieval in another, even for the same user.
 
     Returns the number of chunks stored.
     """
@@ -325,6 +329,7 @@ async def process_and_store_pdf(supabase: Client, file_bytes: bytes, filename: s
     rows = [
         {
             "user_id": user_id,
+            "session_id": session_id,
             "document_name": filename,
             "chunk_text": chunk_text,
             "embedding": embedding,
@@ -334,7 +339,7 @@ async def process_and_store_pdf(supabase: Client, file_bytes: bytes, filename: s
 
     supabase.table("document_chunks").insert(rows).execute()
 
-    logger.info(f"Stored {len(rows)} chunks for '{filename}' (user {user_id}).")
+    logger.info(f"Stored {len(rows)} chunks for '{filename}' (user {user_id}, session {session_id}).")
     return len(rows)
 
 
@@ -342,12 +347,16 @@ async def get_relevant_context(
     supabase: Client,
     query: str,
     user_id: str,
+    session_id: str,
     top_k: int = 3,
     document_name: Optional[str] = None,
 ) -> List[RetrievedChunk]:
     """
     Embeds `query` and retrieves the top_k most similar chunks belonging to
-    `user_id` via the `match_document_chunks` Supabase RPC function.
+    `user_id` AND scoped to `session_id` via the `match_document_chunks`
+    Supabase RPC function. `session_id` is the Context Isolation boundary:
+    a document uploaded in a different chat session, even by the same user,
+    is never returned here.
 
     When `document_name` is given, it's passed through as `filter_document_name`
     and applied inside the RPC's SQL WHERE clause — used right after a file is
@@ -388,6 +397,7 @@ async def get_relevant_context(
             "match_threshold": DEFAULT_MATCH_THRESHOLD,
             "match_count": max(candidate_count, top_k),
             "filter_user_id": user_id,
+            "filter_session_id": session_id,
             "filter_document_name": document_name,
         },
     ).execute()
@@ -404,20 +414,21 @@ async def get_relevant_context(
     ]
 
 
-async def list_user_documents(supabase: Client, user_id: str) -> List[DocumentMetadata]:
+async def list_user_documents(supabase: Client, user_id: str, session_id: str) -> List[DocumentMetadata]:
     """
-    Lists the distinct documents a user has stored, aggregated from
-    document_chunks (chunk_count + earliest created_at per document_name).
-    Shared by the deterministic GET /api/documents endpoint and the chat
-    agent's list_documents tool, so both surfaces answer "what documents do
-    you have" from the same real, RLS-scoped rows instead of the chat path
-    inferring an answer from a lossy top-k semantic search over
-    search_knowledge_base.
+    Lists the distinct documents a user has stored in `session_id`,
+    aggregated from document_chunks (chunk_count + earliest created_at per
+    document_name). Shared by the deterministic GET /api/documents endpoint
+    and the chat agent's list_documents tool, so both surfaces answer "what
+    documents do you have" from the same real, RLS-scoped, session-scoped
+    rows instead of the chat path inferring an answer from a lossy top-k
+    semantic search over search_knowledge_base.
     """
     res = (
         supabase.table("document_chunks")
         .select("document_name, created_at")
         .eq("user_id", user_id)
+        .eq("session_id", session_id)
         .order("created_at")
         .execute()
     )

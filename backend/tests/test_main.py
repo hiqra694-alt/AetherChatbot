@@ -39,14 +39,19 @@ def _make_mock_supabase():
 
     return mock_supabase
 
+@patch("api.chat.routers.extract_and_store_memory")
 @patch("api.chat.services.get_relevant_context")
 @patch("api.chat.routers.create_client")
-def test_chat_endpoint_mock_provider(mock_create_client, mock_get_relevant_context):
+def test_chat_endpoint_mock_provider(mock_create_client, mock_get_relevant_context, mock_extract_and_store_memory):
     # No file attached in this request (agentic Branch B), and MockProvider
     # never emits a tool call, so RAG retrieval must never fire — it's only
     # triggered if the model itself calls the search_knowledge_base tool.
+    # The memory-extraction background task is mocked out too: it would
+    # otherwise hit the real Groq API (a real GROQ_API_KEY is configured for
+    # this project's .env), same testing gotcha as get_relevant_context/Voyage.
     mock_create_client.return_value = _make_mock_supabase()
     mock_get_relevant_context.return_value = []
+    mock_extract_and_store_memory.return_value = None
 
     response = client.post(
         "/api/chat",
@@ -87,7 +92,7 @@ def test_chat_endpoint_missing_file_and_message(mock_create_client):
 def test_chat_endpoint_file_only_upload_acknowledges_without_llm_call(mock_create_client, mock_process_and_store_pdf):
     mock_create_client.return_value = _make_mock_supabase()
 
-    async def fake_process_and_store_pdf(supabase, file_bytes, filename, user_id):
+    async def fake_process_and_store_pdf(supabase, file_bytes, filename, user_id, session_id):
         return 3
 
     mock_process_and_store_pdf.side_effect = fake_process_and_store_pdf

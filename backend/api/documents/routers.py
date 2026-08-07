@@ -1,7 +1,7 @@
 import logging
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from supabase import create_client, Client, ClientOptions
 
 from core.config import get_settings
@@ -53,11 +53,14 @@ async def get_authenticated_supabase(authorization: Optional[str] = Header(None)
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
+    sessionId: str = Form(...),
     auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
 ):
     """
     Accepts a PDF upload and runs it through process_and_store_pdf, storing
-    the resulting chunks scoped to the authenticated user.
+    the resulting chunks scoped to the authenticated user AND `sessionId`
+    (Context Isolation) so the document is only ever retrievable from that
+    same chat session.
     """
     supabase, user_id = auth
 
@@ -69,7 +72,7 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
-        chunks_stored = await process_and_store_pdf(supabase, file_bytes, file.filename, user_id)
+        chunks_stored = await process_and_store_pdf(supabase, file_bytes, file.filename, user_id, sessionId)
     except Exception as processing_err:
         logger.error(f"Failed to process document '{file.filename}' for user {user_id}: {processing_err}")
         raise HTTPException(status_code=500, detail="Failed to process document. Please try again later.")
@@ -83,16 +86,19 @@ async def upload_document(
 
 
 @router.get("", response_model=DocumentListResponse)
-async def list_documents(auth: Tuple[Client, str] = Depends(get_authenticated_supabase)):
+async def list_documents(
+    sessionId: str = Query(...),
+    auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
+):
     """
-    Lists the authenticated user's processed documents, aggregated from
-    their stored chunks. RLS on document_chunks already restricts rows to
-    this user, so no additional filtering is required here.
+    Lists the authenticated user's processed documents scoped to `sessionId`.
+    RLS on document_chunks already restricts rows to this user, but the
+    session_id filter is what enforces Context Isolation between chats.
     """
     supabase, user_id = auth
 
     try:
-        documents = await list_user_documents(supabase, user_id)
+        documents = await list_user_documents(supabase, user_id, sessionId)
     except Exception as db_err:
         logger.error(f"Failed to list documents for user {user_id}: {db_err}")
         raise HTTPException(status_code=500, detail="Failed to fetch documents. Please try again later.")
@@ -103,13 +109,15 @@ async def list_documents(auth: Tuple[Client, str] = Depends(get_authenticated_su
 @router.delete("/{document_name}", response_model=DocumentDeleteResponse)
 async def delete_document(
     document_name: str,
+    sessionId: str = Query(...),
     auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
 ):
     """
     Deletes every stored chunk for `document_name` belonging to the
-    authenticated user, revoking the AI's access to that document. RLS on
-    document_chunks already restricts deletes to the caller's own rows, but
-    the user_id filter is kept explicit here to match list_documents/upload.
+    authenticated user within `sessionId`, revoking the AI's access to that
+    document in that chat. RLS on document_chunks already restricts deletes
+    to the caller's own rows, but the user_id/session_id filters are kept
+    explicit here to match list_documents/upload.
     """
     supabase, user_id = auth
 
@@ -118,6 +126,7 @@ async def delete_document(
             supabase.table("document_chunks")
             .delete()
             .eq("user_id", user_id)
+            .eq("session_id", sessionId)
             .eq("document_name", document_name)
             .execute()
         )

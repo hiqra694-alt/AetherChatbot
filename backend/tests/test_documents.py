@@ -46,6 +46,7 @@ def test_delete_document_success(mock_create_client):
 
     response = client.delete(
         "/api/documents/handbook.pdf",
+        params={"sessionId": "sess-1"},
         headers={"Authorization": "Bearer fake_token"},
     )
     assert response.status_code == 200
@@ -60,6 +61,7 @@ def test_delete_document_not_found(mock_create_client):
 
     response = client.delete(
         "/api/documents/missing.pdf",
+        params={"sessionId": "sess-1"},
         headers={"Authorization": "Bearer fake_token"},
     )
     assert response.status_code == 404
@@ -67,7 +69,7 @@ def test_delete_document_not_found(mock_create_client):
 
 
 def test_delete_document_unauthorized():
-    response = client.delete("/api/documents/handbook.pdf")
+    response = client.delete("/api/documents/handbook.pdf", params={"sessionId": "sess-1"})
     assert response.status_code == 401
     assert "detail" in response.json()
 
@@ -101,13 +103,14 @@ async def test_get_relevant_context_passes_filter_document_name_to_rpc(mock_embe
     mock_supabase, mock_rpc_builder = _make_mock_supabase_for_rpc(rows)
 
     result = await get_relevant_context(
-        mock_supabase, "summarize the pdf", "user-123", document_name="IQRA HAMEED_CV.pdf"
+        mock_supabase, "summarize the pdf", "user-123", "sess-1", document_name="IQRA HAMEED_CV.pdf"
     )
 
     mock_supabase.rpc.assert_called_once()
     rpc_name, rpc_params = mock_supabase.rpc.call_args.args
     assert rpc_name == "match_document_chunks"
     assert rpc_params["filter_user_id"] == "user-123"
+    assert rpc_params["filter_session_id"] == "sess-1"
     assert rpc_params["filter_document_name"] == "IQRA HAMEED_CV.pdf"
 
     assert len(result) == 1
@@ -124,8 +127,9 @@ async def test_get_relevant_context_no_document_name_passes_none(mock_embed):
     ]
     mock_supabase, mock_rpc_builder = _make_mock_supabase_for_rpc(rows)
 
-    result = await get_relevant_context(mock_supabase, "what did we discuss?", "user-123")
+    result = await get_relevant_context(mock_supabase, "what did we discuss?", "user-123", "sess-1")
 
     _, rpc_params = mock_supabase.rpc.call_args.args
+    assert rpc_params["filter_session_id"] == "sess-1"
     assert rpc_params["filter_document_name"] is None
     assert len(result) == 2

@@ -6,7 +6,53 @@ from unittest.mock import MagicMock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.chat.tools import search_chat_history, SEARCH_CHAT_HISTORY_TOOL, SEARCH_KNOWLEDGE_BASE_TOOL, execute_tool
+from api.chat.tools import (
+    search_chat_history,
+    SEARCH_CHAT_HISTORY_TOOL,
+    SEARCH_KNOWLEDGE_BASE_TOOL,
+    execute_tool,
+    repair_tool_arguments,
+)
+
+
+def test_repair_tool_arguments_valid_json_passthrough():
+    assert repair_tool_arguments("get_weather", '{"city": "Lahore", "unit": "celsius"}') == {
+        "city": "Lahore", "unit": "celsius"
+    }
+
+
+def test_repair_tool_arguments_truncated_mid_string_value():
+    # Cut off mid-value, as if a token limit hit right after the city name.
+    assert repair_tool_arguments("get_weather", '{"city": "San Francisco') == {"city": "San Francisco"}
+
+
+def test_repair_tool_arguments_truncated_after_trailing_comma():
+    assert repair_tool_arguments(
+        "duckduckgo_search", '{"search_query": "coffee shops near me",'
+    ) == {"search_query": "coffee shops near me"}
+
+
+def test_repair_tool_arguments_truncated_mid_second_key():
+    assert repair_tool_arguments(
+        "get_weather", '{"city": "Lahore", "uni'
+    ) == {"city": "Lahore"}
+
+
+def test_repair_tool_arguments_unrecoverable_json_falls_back_to_regex_scan():
+    # Not JSON-repairable at all (garbled structure), but the required
+    # field is still sitting there in plain text for the regex fallback.
+    assert repair_tool_arguments(
+        "get_weather", 'garbled nonsense "city": "Lahore" more garbage'
+    ) == {"city": "Lahore"}
+
+
+def test_repair_tool_arguments_empty_string_returns_empty_dict():
+    assert repair_tool_arguments("get_weather", "") == {}
+    assert repair_tool_arguments("get_weather", "   ") == {}
+
+
+def test_repair_tool_arguments_totally_unrecoverable_returns_empty_dict():
+    assert repair_tool_arguments("get_weather", "not json and no fields at all") == {}
 
 @pytest.mark.asyncio
 async def test_search_chat_history_tool_schema():
@@ -111,9 +157,10 @@ async def test_search_knowledge_base_tool_schema():
 
 @pytest.mark.asyncio
 async def test_execute_tool_dispatcher_search_knowledge_base(monkeypatch):
-    async def fake_get_relevant_context(supabase, query, user_id, top_k=3, document_name=None):
+    async def fake_get_relevant_context(supabase, query, user_id, session_id, top_k=3, document_name=None):
         assert query == "SwimAI project"
         assert user_id == "user-123"
+        assert session_id == "sess_1"
         assert document_name is None
         return []
 

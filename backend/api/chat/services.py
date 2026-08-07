@@ -1,32 +1,41 @@
 import json
 import logging
+import re
+import uuid
 from typing import AsyncGenerator, Callable, Awaitable, Optional
 from fastapi import HTTPException
 from supabase import Client
 from api.chat.schemas import Message, ProviderEnum
 from providers.factory import ProviderFactory
 from providers.base import BaseProvider
-from api.chat.tools import (
-    BASE_TOOLS,
-    DUCKDUCKGO_SEARCH_TOOL,
-    LIST_DOCUMENTS_TOOL,
-    SEARCH_KNOWLEDGE_BASE_TOOL,
-    execute_tool,
-)
+from api.chat.tools import ALL_TOOLS, execute_tool, repair_tool_arguments
 from api.documents.services import format_retrieved_chunks, get_relevant_context
+from api.memory.services import format_memory_for_prompt, list_user_memory
 
 logger = logging.getLogger(__name__)
+
+# Every tool this app knows how to execute, in the order offered to the
+# model. Sourced from api.chat.tools.ALL_TOOLS (the single registry) rather
+# than listed again here, so a tool added to tools.py is automatically
+# offered without a second place to remember to update it.
+ACTIVE_TOOLS = list(ALL_TOOLS)
 
 def _is_transient_tool_formatting_error(err_msg: str) -> bool:
     """
     Matches the provider error strings that indicate a flaky/malformed tool
-    call emission (Groq/Llama occasionally misformats a function call under
-    load or on longer contexts) rather than a hard failure -- these are worth
-    a single silent retry before surfacing an error to the user.
+    call emission or an invalid tool-call attempt against the current
+    request's tool set (Groq/Llama occasionally misformats a function call,
+    or tries to call a tool that wasn't offered this turn -- most commonly
+    on a post-tool synthesis turn, where turn_tools is deliberately empty)
+    rather than a hard failure -- these are worth a single silent retry
+    (with tool-calling forced off) before degrading gracefully to whatever
+    text has already streamed, rather than surfacing an error to the user.
     """
     return (
         "tool call validation failed" in err_msg
         or "attempted to call tool" in err_msg
+        or "which was not in request.tools" in err_msg
+        or "not in request's tools" in err_msg
         or "failed to call a function" in err_msg
         or "adjust your prompt" in err_msg
         or "failed_generation" in err_msg
@@ -63,15 +72,30 @@ SYSTEM_PROMPT = Message(
         "filename (e.g. 'according to my CV', 'summarize my report', 'what projects are in my CV'). If the "
         "question is about what's written in a document rather than which documents exist, this is the "
         "right tool, not list_documents.\n"
-        "- duckduckgo_search: use autonomously for current events, real-time facts, or anything you would "
-        "not reliably know — decide on your own whether a question needs live web results, the same way "
-        "you decide between any other tool. Do not call it for foundational concepts or general knowledge "
-        "you already know with confidence; see the Epistemic humility rule below for the ambiguous case.\n"
-        "- calculator: use only for explicit arithmetic expressions.\n"
+        "- duckduckgo_search: always use this for real-time external events, breaking news, live prices, "
+        "scores, or a highly niche/conflicting domain acronym you're not confident about — if the answer "
+        "depends on current, real-world information rather than your own training, call it rather than "
+        "guessing. Do not call it for foundational computer science concepts, standard definitions, or "
+        "general world facts already in your own knowledge; see the Epistemic humility rule below for the "
+        "ambiguous case.\n"
+        "- calculator: use only for complex multi-step arithmetic, equation solving, or financial/"
+        "statistical formulas. Never use it for factual trivia, sports rules or player counts, general "
+        "knowledge, simple single-step counting, or dates just because the answer happens to be a number.\n"
         "- get_current_time: use only when the user asks for the current date/time in some location.\n"
-        "- get_weather: use only when the user asks for current weather/temperature in a city.\n"
-        "- search_chat_history: use only when the user explicitly asks about earlier messages or past "
-        "conversations.\n\n"
+        "- get_weather: always use this when the user asks for current weather/temperature/conditions in a "
+        "city — never guess or answer from general climate knowledge instead.\n"
+        "- search_chat_history: use only when the user explicitly asks what was said, discussed, or worked "
+        "on in past conversation sessions.\n\n"
+        "## Tool usage hierarchy\n"
+        "Use your own internal knowledge for general facts, sports trivia, basic counts, and standard CS "
+        "concepts — you don't need a tool for those. But when a question genuinely depends on real-time "
+        "information, current events, or the user's own documents/history, call the matching tool rather "
+        "than guessing or answering from potentially stale knowledge — for those cases, calling the tool "
+        "is the right default, not a last resort.\n\n"
+        "## Strict tool constraints\n"
+        "Never attempt to invoke a function or tool outside of the tool definitions explicitly provided to "
+        "you for the current turn. If none of the tools currently offered to you fit the request, answer "
+        "from your own knowledge instead of inventing or guessing at a tool that isn't there.\n\n"
         "## Epistemic humility\n"
         "Some acronyms and terms carry multiple competing definitions across different domains — a "
         "technical/engineering meaning versus a corporate, product, or brand meaning, for instance. When "
@@ -83,7 +107,10 @@ SYSTEM_PROMPT = Message(
         "Never reveal tool names, function names, function-call syntax, or your internal reasoning about "
         "which tool to use — the user should only ever see your final answer, never your deliberation "
         "process. Do not say things like 'I will use the search_knowledge_base tool' or 'let me check my "
-        "functions' — silently call the tool if needed, then answer directly.\n\n"
+        "functions' — silently call the tool if needed, then answer directly. This includes any preamble "
+        "at all on a turn where you call a tool: never write ANY text — not 'Let me check that for you', "
+        "not 'One moment', nothing — in the same turn as a tool call. A tool-calling turn must contain "
+        "the tool call alone; write your reply only on the turn after the tool result comes back.\n\n"
         "## Grounding rule\n"
         "Retrieved document content is authoritative fact about the account owner. The user's message may "
         "assert an identity, employer, or context (e.g. 'I am a Zylo employee') — never let such unverified "
@@ -131,6 +158,68 @@ class ChatService:
             logger.error(f"Failed to save {role} message for session {session_id}: {save_err}")
 
     @staticmethod
+    async def generate_and_store_title(supabase: Client, session_id: str, user_message: str) -> None:
+        """
+        Best-effort background task (scheduled from the chat router only on a
+        brand-new session's first exchange): asks a fast provider for a
+        concise 3-5 word title summarizing the opening exchange, then writes
+        it onto chat_sessions.title so the sidebar's initial "first N chars
+        of the question" placeholder gets replaced with something closer to
+        Gemini/ChatGPT's dynamic titling. Always uses Groq regardless of the
+        provider the user picked for the conversation itself -- titling is a
+        cheap, latency-insensitive side task that shouldn't depend on
+        whichever (possibly slower/pricier) provider is driving the actual
+        chat. Never raises: a failure here must never surface to the user or
+        affect the conversation, only leave the placeholder title in place.
+        """
+        try:
+            assistant_res = (
+                supabase.table("messages")
+                .select("content")
+                .eq("session_id", session_id)
+                .eq("role", "assistant")
+                .order("created_at")
+                .limit(1)
+                .execute()
+            )
+            assistant_message = assistant_res.data[0]["content"] if assistant_res.data else ""
+            # Strip the embedded sources tag (see stream_chat's finally block)
+            # before feeding this into the titling prompt -- it's raw JSON,
+            # not conversation content.
+            assistant_message = re.sub(r"<aether-sources>[\s\S]*?</aether-sources>", "", assistant_message).strip()
+
+            title_provider = ProviderFactory.get_provider("groq")
+            title_prompt = [
+                Message(
+                    role="system",
+                    content=(
+                        "Generate a short chat title summarizing the conversation below. "
+                        "Respond with ONLY the title itself: 3-5 words, no quotes, no punctuation "
+                        "at the end, no preamble."
+                    ),
+                ),
+                Message(
+                    role="user",
+                    content=f"User: {user_message[:500]}\nAssistant: {assistant_message[:500]}",
+                ),
+            ]
+
+            title = ""
+            async for chunk in title_provider.stream_response(title_prompt, tools=None):
+                if isinstance(chunk, str):
+                    title += chunk
+
+            title = title.strip().strip('"').strip("'").strip()
+            if not title:
+                return
+            if len(title) > 60:
+                title = title[:60].rstrip()
+
+            supabase.table("chat_sessions").update({"title": title}).eq("id", session_id).execute()
+        except Exception as title_err:
+            logger.warning(f"Failed to auto-generate title for session {session_id}: {title_err}")
+
+    @staticmethod
     def get_provider(provider_enum: ProviderEnum) -> BaseProvider:
         try:
             return ProviderFactory.get_provider(provider_enum.value)
@@ -141,51 +230,81 @@ class ChatService:
             raise HTTPException(status_code=500, detail="AI Provider Initialization Error. Please check your configuration.")
 
     @staticmethod
+    async def _build_memory_block(supabase: Client, user_id: Optional[str]) -> str:
+        """
+        Fetches every durable fact stored in `user_memory` for `user_id` (the
+        Gemini-style global memory, independent of session_id) and renders it
+        as a system-prompt block. Runs on every turn, not just when a file is
+        attached, since these facts are meant to be available across all of
+        the user's chats. Retrieval failures (no facts yet, DB hiccup) are
+        swallowed and degrade to "no memory this turn" -- memory must never
+        be a point of failure for chat, same contract as document retrieval
+        below.
+        """
+        if not user_id:
+            return ""
+
+        try:
+            facts = await list_user_memory(supabase, user_id)
+        except Exception as mem_err:
+            logger.warning(f"User memory retrieval failed, continuing without it: {mem_err}")
+            return ""
+
+        if not facts:
+            return ""
+
+        return "\n\n<user_memory>\n" + format_memory_for_prompt(facts) + "\n</user_memory>"
+
+    @staticmethod
     async def _build_system_prompt(
         supabase: Client,
         user_id: Optional[str],
+        session_id: str,
         user_message: str,
         document_name: Optional[str] = None,
     ) -> Message:
         """
-        BRANCH A ONLY (a file was attached in this request, so `document_name`
-        is set): immediately retrieves that document's chunks and injects
-        them into the system prompt so generation is deterministically
-        grounded in the just-uploaded file — no model decision needed.
+        Builds this turn's system prompt as SYSTEM_PROMPT plus two strictly
+        additive, independently-optional blocks:
 
-        BRANCH B (no file attached, `document_name` is None): returns the
-        base SYSTEM_PROMPT unchanged and does NOT call get_relevant_context.
-        Retrieval in that case is agentic — it only happens if the model
-        itself decides to call the `search_knowledge_base` tool (see
-        api.chat.tools.search_knowledge_base), so a plain conversational
-        turn never pays for an unnecessary Voyage/Supabase round trip.
+        1. User memory (see _build_memory_block): durable cross-session facts,
+           fetched on every turn regardless of whether a file is attached.
+
+        2. Document context, BRANCH A ONLY (a file was attached in this
+           request, so `document_name` is set): immediately retrieves that
+           document's chunks -- scoped to both `user_id` and `session_id`
+           (Context Isolation) -- and injects them so generation is
+           deterministically grounded in the just-uploaded file. BRANCH B (no
+           file attached) does NOT call get_relevant_context here; retrieval
+           in that case is agentic, only happening if the model itself calls
+           the `search_knowledge_base` tool (see api.chat.tools), so a plain
+           conversational turn never pays for an unnecessary Voyage/Supabase
+           round trip.
 
         Never mutates the shared SYSTEM_PROMPT singleton, since that object
-        is reused across every request. Retrieval failures (no documents
-        yet, Voyage/RPC errors) are swallowed and fall back to the base
-        prompt so RAG grounding is strictly additive, never a point of
-        failure for chat.
+        is reused across every concurrent request/user -- if neither block
+        produces anything, the original singleton is returned unchanged;
+        otherwise a fresh Message is built. Both blocks swallow their own
+        retrieval failures so grounding stays strictly additive, never a
+        point of failure for chat.
         """
-        if not user_id or not document_name or not user_message.strip():
+        additions = await ChatService._build_memory_block(supabase, user_id)
+
+        if user_id and document_name and user_message.strip():
+            try:
+                chunks = await get_relevant_context(supabase, user_message, user_id, session_id, document_name=document_name)
+            except Exception as context_err:
+                logger.warning(f"Document context retrieval failed, continuing without it: {context_err}")
+                chunks = []
+
+            if chunks:
+                context_blocks = format_retrieved_chunks(chunks)
+                additions += f"\n\n<knowledge_base_context>\n{context_blocks}\n</knowledge_base_context>"
+
+        if not additions:
             return SYSTEM_PROMPT
 
-        try:
-            chunks = await get_relevant_context(supabase, user_message, user_id, document_name=document_name)
-        except Exception as context_err:
-            logger.warning(f"Document context retrieval failed, continuing without it: {context_err}")
-            return SYSTEM_PROMPT
-
-        if not chunks:
-            return SYSTEM_PROMPT
-
-        context_blocks = format_retrieved_chunks(chunks)
-        grounded_content = (
-            f"{SYSTEM_PROMPT.content}\n\n"
-            "<knowledge_base_context>\n"
-            f"{context_blocks}\n"
-            "</knowledge_base_context>"
-        )
-        return Message(role="system", content=grounded_content)
+        return Message(role="system", content=f"{SYSTEM_PROMPT.content}{additions}")
 
     @staticmethod
     async def stream_chat(
@@ -216,14 +335,14 @@ class ChatService:
             # flag, on top of the model's own tool selection, doubled up the
             # routing decision and made the model second-guess itself more
             # often ("tool paralysis"), not less.
-            active_tools = list(BASE_TOOLS) + [SEARCH_KNOWLEDGE_BASE_TOOL, LIST_DOCUMENTS_TOOL, DUCKDUCKGO_SEARCH_TOOL]
+            active_tools = list(ACTIVE_TOOLS)
 
             # Prevent aggressive triggering of chat history for short ambiguous inputs
             if len(latest_user_message.strip()) < 5:
                 active_tools = [t for t in active_tools if t.get("function", {}).get("name") != "search_chat_history"]
 
         system_message = await ChatService._build_system_prompt(
-            supabase, user_id, latest_user_message, document_name=scoped_document_name
+            supabase, user_id, session_id, latest_user_message, document_name=scoped_document_name
         )
 
         if not history or history[0].role != "system":
@@ -245,8 +364,14 @@ class ChatService:
                 # already made — a real contributor to synthesis turns
                 # ignoring retrieved content and fabricating placeholders.
                 turn_tools = [] if has_called_tool else active_tools
+                turn_tool_names = {t.get("function", {}).get("name") for t in turn_tools}
                 tool_calls_received = None
                 turn_text = ""
+                # Length of full_text before this turn streamed anything --
+                # lets a later retraction (see below) trim back exactly this
+                # turn's contribution without disturbing any prior turn's
+                # already-confirmed-final text.
+                full_text_len_before_turn = len(full_text)
 
                 # A transient tool-formatting error is retried once, but only
                 # while nothing has been streamed to the user yet this turn --
@@ -264,31 +389,133 @@ class ChatService:
                                 return
 
                             if isinstance(chunk, dict) and chunk.get("type") == "tool_calls":
-                                tool_calls_received = chunk.get("tool_calls")
+                                tool_calls_received = (tool_calls_received or []) + list(chunk.get("tool_calls") or [])
+                            elif isinstance(chunk, dict) and chunk.get("type") == "text_tool_call":
+                                # Dual-mode fallback: the provider (currently
+                                # only Groq/llama-3.3-70b-versatile) emitted a
+                                # tool call as a literal `<tool_name>{...}</tool_name>`
+                                # text tag instead of a native tool_calls object.
+                                # The provider adapter already keeps that raw tag
+                                # out of the streamed content and only extracts
+                                # names offered to it this turn -- but this is
+                                # re-validated here against turn_tool_names
+                                # (rather than trusted blindly) so any provider
+                                # emitting this event type is held to the same
+                                # "never invoke a tool outside what was
+                                # explicitly offered this turn" rule. A valid
+                                # match is normalized into the same shape a
+                                # native call would have (with a synthetic id,
+                                # since text tags carry none) so the rest of
+                                # this loop -- execution, appending history, and
+                                # the synthesis turn -- proceeds identically to
+                                # the native tool-calling path.
+                                tag_name = chunk.get("name", "")
+                                if tag_name not in turn_tool_names:
+                                    logger.warning(
+                                        f"Discarding text-tag tool call for '{tag_name}': not among the "
+                                        "tools offered this turn."
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Provider emitted tool call '{tag_name}' as a text tag "
+                                        "instead of a native tool_calls object; using text-tag fallback."
+                                    )
+                                    synthetic_call = {
+                                        "id": f"text_tag_{uuid.uuid4().hex[:8]}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": tag_name,
+                                            "arguments": chunk.get("arguments") or "{}",
+                                        },
+                                    }
+                                    tool_calls_received = (tool_calls_received or []) + [synthetic_call]
                             elif isinstance(chunk, str):
                                 turn_text += chunk
                                 full_text += chunk
                                 yield f"data: {json.dumps({'content': chunk})}\n\n"
                         break
                     except Exception as turn_err:
-                        if attempt == 0 and not turn_text and _is_transient_tool_formatting_error(str(turn_err).lower()):
-                            logger.warning(f"Transient tool-formatting error, retrying turn once: {turn_err}")
+                        err_msg = str(turn_err).lower()
+                        if _is_transient_tool_formatting_error(err_msg):
+                            if attempt == 0 and not turn_text:
+                                tool_calls_received = None
+                                if has_called_tool:
+                                    # Includes the "attempted to call tool X
+                                    # which was not in request.tools"
+                                    # validation error -- this is a post-tool
+                                    # synthesis turn, where turn_tools is
+                                    # deliberately empty but the model still
+                                    # tries to call something. Retrying with
+                                    # tool-calling explicitly forced off
+                                    # (rather than just repeating the same
+                                    # request) is what actually resolves it
+                                    # instead of reproducing the same
+                                    # rejection.
+                                    logger.warning(
+                                        f"Tool-call validation error on synthesis turn, retrying once "
+                                        f"with tool-calling forced off: {turn_err}"
+                                    )
+                                    turn_tools = []
+                                    turn_tool_names = set()
+                                else:
+                                    # This is a genuine first attempt at
+                                    # calling a tool (has_called_tool is
+                                    # still False), not a synthesis-turn
+                                    # artifact -- most likely Llama flaking on
+                                    # the call's formatting under load or a
+                                    # long context. Keep turn_tools intact so
+                                    # the retry gives the model a real second
+                                    # chance to call the tool correctly,
+                                    # instead of guaranteeing it can't by
+                                    # stripping tools out from under it.
+                                    logger.warning(
+                                        f"Transient tool-formatting error on first attempt, retrying "
+                                        f"turn once with tools still enabled: {turn_err}"
+                                    )
+                                continue
+                            # Either the retry above also hit a validation
+                            # error, or text had already started streaming
+                            # when the error occurred (so retrying would
+                            # duplicate visible output). Either way this is a
+                            # known, benign tool-calling hiccup, not a real
+                            # failure -- degrade gracefully to whatever text
+                            # has already streamed instead of surfacing an
+                            # internal API validation error to the user.
+                            logger.warning(
+                                f"Tool-call validation error persisted; degrading turn to plain text: {turn_err}"
+                            )
                             tool_calls_received = None
-                            continue
+                            break
                         raise
 
                 if tool_calls_received:
+                    if turn_text.strip():
+                        # This turn streamed real content before also (or
+                        # instead) deciding to call a tool -- e.g. llama-
+                        # 3.3-70b-versatile narrating "Let me check the
+                        # weather..." ahead of the native tool_calls delta,
+                        # despite SYSTEM_PROMPT forbidding it. That text has
+                        # already reached the browser live (see the `elif
+                        # isinstance(chunk, str)` yield above), so it can't be
+                        # un-sent -- instead, tell the client to wipe it from
+                        # the message bubble before the synthesis turn's real
+                        # answer starts arriving, and drop it from full_text
+                        # so the persisted message doesn't carry it either.
+                        full_text = full_text[:full_text_len_before_turn]
+                        yield f"data: {json.dumps({'retract': True})}\n\n"
                     has_called_tool = True
                     history.append(Message(role="assistant", content=turn_text if turn_text.strip() else None, tool_calls=tool_calls_received))
 
                     for tc in tool_calls_received:
                         tool_call_id = tc["id"]
                         tool_name = tc["function"]["name"]
-                        try:
-                            tool_args = json.loads(tc["function"]["arguments"])
-                        except json.JSONDecodeError:
-                            tool_args = {}
-                            
+                        # Tolerates dirty/truncated JSON in the accumulated
+                        # arguments string (see repair_tool_arguments) instead
+                        # of silently dropping every argument -- including
+                        # required ones like `city` or `search_query` -- the
+                        # moment a strict json.loads first fails.
+                        tool_args = repair_tool_arguments(tool_name, tc["function"]["arguments"])
+
                         # Execute the tool using the master dispatcher
                         result_str = await execute_tool(tool_name, tool_args, supabase, session_id, user_id)
                         

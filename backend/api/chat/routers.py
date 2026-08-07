@@ -1,7 +1,7 @@
 import json
 import logging
 from typing import Optional, Tuple
-from fastapi import APIRouter, Request, Header, HTTPException, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Request, Header, HTTPException, Depends, File, Form, UploadFile, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from supabase import create_client, Client, ClientOptions
 
@@ -9,6 +9,7 @@ from core.config import get_settings
 from api.chat.schemas import Message, ProviderEnum
 from api.chat.services import ChatService
 from api.documents.services import process_and_store_pdf
+from api.memory.services import extract_and_store_memory
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ async def chat_endpoint(
     message: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
+    background_tasks: BackgroundTasks = None,
 ):
     """
     Unified multipart chat endpoint. Accepts an optional PDF upload and/or an
@@ -84,12 +86,18 @@ async def chat_endpoint(
         try:
             # Must finish before generation starts so the newly stored chunks
             # are visible to get_relevant_context() later in this request.
-            chunks_stored = await process_and_store_pdf(supabase, file_bytes, file.filename, user_id)
+            # Scoped to sessionId (Context Isolation) so this document is
+            # only ever retrievable from this same chat.
+            chunks_stored = await process_and_store_pdf(supabase, file_bytes, file.filename, user_id, sessionId)
         except Exception as processing_err:
             logger.error(f"Failed to process uploaded document '{file.filename}' for user {user_id}: {processing_err}")
             raise HTTPException(status_code=500, detail="Failed to process the uploaded document. Please try again later.")
 
     history = await ChatService.get_history(supabase, sessionId)
+    # Captured before this turn's user message is appended below, so it's
+    # True only for a session's very first exchange -- title generation
+    # should run once per session, not on every subsequent message.
+    is_new_session = len(history) == 0
 
     if file is not None and not has_message:
         # Scenario A: file-only upload, no question yet — acknowledge and stop, no LLM call.
@@ -128,4 +136,19 @@ async def chat_endpoint(
         scoped_document_name=file.filename if file is not None else None
     )
 
-    return StreamingResponse(generator, media_type="text/event-stream")
+    # Gemini-style global memory: after every turn with a user message, ask a
+    # fast provider whether it stated a durable fact/preference and persist
+    # it to user_memory if so. Scheduled here (rather than inside
+    # ChatService.stream_chat) so it only ever depends on the user's own
+    # message text, not on generation having finished successfully.
+    background_tasks.add_task(extract_and_store_memory, supabase, user_id, message)
+
+    response = StreamingResponse(generator, media_type="text/event-stream")
+    if is_new_session:
+        # Runs only after the streaming body above has been fully sent (by
+        # which point ChatService.stream_chat's `finally` block has already
+        # persisted the assistant's reply), so the title task can read both
+        # sides of the opening exchange straight from the DB.
+        background_tasks.add_task(ChatService.generate_and_store_title, supabase, sessionId, message)
+    response.background = background_tasks
+    return response

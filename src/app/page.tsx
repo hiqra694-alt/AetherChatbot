@@ -28,7 +28,10 @@ import {
   AlertTriangle,
   Paperclip,
   FileText,
-  Database
+  Database,
+  Settings,
+  Monitor,
+  ChevronRight
 } from 'lucide-react'
 
 interface UserProfile {
@@ -58,11 +61,17 @@ interface Message {
   attachedFileName?: string
 }
 
-interface KnowledgeDocument {
-  document_name: string
-  chunk_count: number
+interface MemoryFact {
+  id: string
+  fact: string
   created_at: string
 }
+
+const THEME_OPTIONS = [
+  { id: 'system', label: 'System', icon: Monitor },
+  { id: 'light', label: 'Light', icon: Sun },
+  { id: 'dark', label: 'Dark', icon: Moon }
+]
 
 const PROVIDERS = [
   { id: 'gemini', name: 'Google Gemini', icon: Flame, color: 'text-violet-600 bg-violet-50 border-violet-200 hover:bg-violet-100', accentColor: 'violet' },
@@ -84,15 +93,17 @@ export default function Dashboard() {
 
   // UI states
   const [inputText, setInputText] = useState('')
-  const [selectedProvider, setSelectedProvider] = useState('gemini')
+  const [selectedProvider, setSelectedProvider] = useState('groq')
   const [isStreaming, setIsStreaming] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [providerDropdownOpen, setProviderDropdownOpen] = useState(false)
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [loadingSessions, setLoadingSessions] = useState(true)
   const [loadingMessages, setLoadingMessages] = useState(false)
-  const [theme, setTheme] = useState('light')
+  const [theme, setTheme] = useState('system')
 
   // New Feature States
   const [showLogoutModal, setShowLogoutModal] = useState(false)
@@ -101,11 +112,11 @@ export default function Dashboard() {
   const [editTitleText, setEditTitleText] = useState('')
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [attachedFile, setAttachedFile] = useState<File | null>(null)
-  const [showKnowledgeBase, setShowKnowledgeBase] = useState(false)
-  const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
-  const [loadingDocuments, setLoadingDocuments] = useState(false)
-  const [documentToDelete, setDocumentToDelete] = useState<string | null>(null)
-  const [deletingDocument, setDeletingDocument] = useState(false)
+  const [showMemory, setShowMemory] = useState(false)
+  const [memoryFacts, setMemoryFacts] = useState<MemoryFact[]>([])
+  const [loadingMemory, setLoadingMemory] = useState(false)
+  const [memoryToDelete, setMemoryToDelete] = useState<string | null>(null)
+  const [deletingMemory, setDeletingMemory] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -131,12 +142,12 @@ export default function Dashboard() {
 
   // Fetch user data and chat sessions on mount
   useEffect(() => {
-    // Check local storage for theme
+    // Check local storage for a previously saved theme preference
+    // ('system' | 'light' | 'dark'). No saved value keeps the 'system'
+    // default the theme state was initialized with.
     const savedTheme = localStorage.getItem('aether_theme')
-    if (savedTheme) {
+    if (savedTheme === 'light' || savedTheme === 'dark' || savedTheme === 'system') {
       setTheme(savedTheme)
-    } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      setTheme('dark')
     }
 
     const initApp = async () => {
@@ -152,14 +163,52 @@ export default function Dashboard() {
     initApp()
   }, [])
 
+  // Applies the resolved dark/light class for the current `theme`
+  // preference and persists it. When `theme` is 'system', this also
+  // subscribes to OS-level color-scheme changes so the UI updates live if
+  // the user flips their system setting without needing a reload.
   useEffect(() => {
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark')
-    } else {
-      document.documentElement.classList.remove('dark')
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+
+    const applyResolvedTheme = () => {
+      const isDark = theme === 'dark' || (theme === 'system' && media.matches)
+      document.documentElement.classList.toggle('dark', isDark)
     }
+
+    applyResolvedTheme()
     localStorage.setItem('aether_theme', theme)
+
+    if (theme === 'system') {
+      media.addEventListener('change', applyResolvedTheme)
+      return () => media.removeEventListener('change', applyResolvedTheme)
+    }
   }, [theme])
+
+
+  // Live-refresh sidebar titles once the backend's auto-titling background
+  // task finishes writing the generated title, without a manual refetch.
+  // Requires Realtime replication to be enabled for `chat_sessions` in the
+  // Supabase dashboard (Database > Replication) plus a SELECT policy that
+  // covers the authenticated role, since postgres_changes is RLS-gated.
+  useEffect(() => {
+    if (!user) return
+
+    const channel = supabase
+      .channel(`chat_sessions_changes_${user.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'chat_sessions', filter: `user_id=eq.${user.id}` },
+        (payload) => {
+          const updated = payload.new as ChatSession
+          setSessions(prev => prev.map(s => s.id === updated.id ? { ...s, title: updated.title } : s))
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [user])
 
   // Auto-scroll to bottom on message list updates or streaming content updates
   useEffect(() => {
@@ -338,50 +387,50 @@ export default function Dashboard() {
     setTimeout(() => setCopiedId(null), 2000)
   }
 
-  const fetchDocuments = async () => {
-    setLoadingDocuments(true)
+  const fetchMemory = async () => {
+    setLoadingMemory(true)
     try {
       const { data: { session } } = await supabase.auth.getSession()
       const token = session?.access_token || ''
 
-      const response = await fetch('/api/documents', {
+      const response = await fetch('/api/memory', {
         headers: { 'Authorization': `Bearer ${token}` }
       })
-      if (!response.ok) throw new Error('Failed to fetch documents.')
+      if (!response.ok) throw new Error('Failed to fetch memory.')
 
       const data = await response.json()
-      setDocuments(data.documents || [])
+      setMemoryFacts(data.facts || [])
     } catch (err) {
-      console.error('Error fetching documents:', err)
+      console.error('Error fetching memory:', err)
     } finally {
-      setLoadingDocuments(false)
+      setLoadingMemory(false)
     }
   }
 
-  const handleOpenKnowledgeBase = () => {
-    setShowKnowledgeBase(true)
-    fetchDocuments()
+  const handleOpenMemory = () => {
+    setShowMemory(true)
+    fetchMemory()
   }
 
-  const confirmDeleteDocument = async () => {
-    if (!documentToDelete) return
-    setDeletingDocument(true)
+  const confirmDeleteMemory = async () => {
+    if (!memoryToDelete) return
+    setDeletingMemory(true)
     try {
       const { data: { session } } = await supabase.auth.getSession()
       const token = session?.access_token || ''
 
-      const response = await fetch(`/api/documents/${encodeURIComponent(documentToDelete)}`, {
+      const response = await fetch(`/api/memory/${encodeURIComponent(memoryToDelete)}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       })
-      if (!response.ok) throw new Error('Failed to delete document.')
+      if (!response.ok) throw new Error('Failed to delete memory fact.')
 
-      setDocuments(prev => prev.filter(d => d.document_name !== documentToDelete))
+      setMemoryFacts(prev => prev.filter(f => f.id !== memoryToDelete))
     } catch (err) {
-      console.error('Error deleting document:', err)
+      console.error('Error deleting memory fact:', err)
     } finally {
-      setDeletingDocument(false)
-      setDocumentToDelete(null)
+      setDeletingMemory(false)
+      setMemoryToDelete(null)
     }
   }
 
@@ -521,6 +570,24 @@ export default function Dashboard() {
                   }
                   return newMsgs
                 })
+              } else if (parsed.retract) {
+                // The backend already streamed some text this turn, then
+                // decided to call a tool after all (e.g. "Let me check the
+                // weather..." ahead of the tool call) -- that preamble must
+                // never end up merged with the real, post-tool answer. Wipe
+                // it from the bubble and show the loading indicator again
+                // until the real answer starts arriving.
+                streamedContent = ''
+                firstChunkReceived = false
+                setIsLoading(true)
+                setMessages(prev => {
+                  const newMsgs = [...prev]
+                  const last = newMsgs[newMsgs.length - 1]
+                  if (last && last.role === 'assistant') {
+                    last.content = ''
+                  }
+                  return newMsgs
+                })
               } else if (parsed.error) {
                 // Backend sent an error event (quota, model not found, etc.)
                 streamError = parsed.error
@@ -650,26 +717,19 @@ export default function Dashboard() {
             <Plus className="w-4 h-4" />
             New Chat
           </button>
-          <button
-            onClick={handleOpenKnowledgeBase}
-            className="w-full py-2.5 px-4 bg-white dark:bg-slate-800/60 hover:bg-slate-50 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold rounded-xl transition-all active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <Database className="w-4 h-4" />
-            My Knowledge Base
-          </button>
         </div>
 
         {/* Sessions History List */}
-        <div className="flex-1 overflow-y-auto px-2 space-y-1 py-2 custom-scrollbar">
-          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 mb-2">
+        <div className="flex-1 overflow-y-auto px-2 space-y-0.5 py-2 custom-scrollbar">
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 mb-1.5">
             Recent Dialogues
           </div>
 
           {loadingSessions ? (
-            <div className="flex flex-col gap-2 p-3">
-              <div className="h-8 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
-              <div className="h-8 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
-              <div className="h-8 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
+            <div className="flex flex-col gap-1.5 p-2">
+              <div className="h-7 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
+              <div className="h-7 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
+              <div className="h-7 bg-slate-200/50 dark:bg-slate-800/50 rounded-lg animate-pulse" />
             </div>
           ) : sessions.length === 0 ? (
             <div className="text-center py-8 px-4 text-xs text-slate-400">
@@ -680,7 +740,7 @@ export default function Dashboard() {
               <div
                 key={session.id}
                 onClick={() => handleSelectSession(session.id)}
-                className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border ${activeSessionId === session.id
+                className={`group flex items-center justify-between py-1.5 px-3 rounded-xl cursor-pointer transition-all border ${activeSessionId === session.id
                     ? 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-950 dark:text-slate-100 shadow-sm font-semibold'
                     : 'bg-transparent border-transparent hover:bg-slate-200/40 dark:hover:bg-slate-800/40 text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
                   }`}
@@ -739,10 +799,18 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* User Card & Logout */}
+        {/* User Card, Profile Settings & Logout */}
         {user && (
-          <div className="p-4 border-t border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/60 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 overflow-hidden">
+          <div className="relative p-4 border-t border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/60 flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setProfileMenuOpen(prev => !prev)
+                setThemeMenuOpen(false)
+              }}
+              className="flex items-center gap-2.5 overflow-hidden flex-1 min-w-0 text-left cursor-pointer rounded-lg hover:bg-slate-200/50 dark:hover:bg-slate-800/50 -m-1 p-1 transition-colors"
+              title="Profile settings"
+            >
               <div className="w-8 h-8 rounded-full bg-violet-600/10 dark:bg-violet-600/20 border border-violet-500/20 dark:border-violet-500/30 flex items-center justify-center text-violet-600 dark:text-violet-400 font-bold uppercase flex-shrink-0 text-sm">
                 {user.email?.charAt(0) || 'U'}
               </div>
@@ -750,14 +818,95 @@ export default function Dashboard() {
                 <span className="text-xs font-semibold text-slate-850 dark:text-slate-200 truncate">{user.email}</span>
                 <span className="text-[9px] text-slate-400 uppercase tracking-wider font-bold">Standard Account</span>
               </div>
-            </div>
+            </button>
             <button
               onClick={handleLogoutClick}
               title="Sign Out"
-              className="p-2 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors cursor-pointer"
+              className="p-2 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors cursor-pointer flex-shrink-0"
             >
               <LogOut className="w-4.5 h-4.5" />
             </button>
+
+            {/* Profile Settings Popover */}
+            {profileMenuOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-20 cursor-default"
+                  onClick={() => {
+                    setProfileMenuOpen(false)
+                    setThemeMenuOpen(false)
+                  }}
+                />
+                <div className="absolute left-4 right-4 bottom-full mb-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-2 animate-fade-in">
+                  <div className="flex items-center gap-2 px-2.5 py-1.5 mb-1 border-b border-slate-100 dark:border-slate-800">
+                    <Settings className="w-3.5 h-3.5 text-slate-400" />
+                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Profile Settings</span>
+                  </div>
+                  {/* Memory menu item -> opens the Memory drawer (facts the AI has learned about the user, shared across every chat) */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileMenuOpen(false)
+                      setThemeMenuOpen(false)
+                      handleOpenMemory()
+                    }}
+                    className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-all cursor-pointer"
+                  >
+                    <Database className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Memory</span>
+                  </button>
+
+                  {/* Theme menu item -> hover/click flyout submenu, mirroring Gemini's settings menu pattern */}
+                  <div
+                    className="relative"
+                    onMouseEnter={() => setThemeMenuOpen(true)}
+                    onMouseLeave={() => setThemeMenuOpen(false)}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setThemeMenuOpen(prev => !prev)}
+                      className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-all cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Monitor className="w-3.5 h-3.5 text-slate-400" />
+                        <span>Theme</span>
+                      </div>
+                      <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                    </button>
+
+                    {themeMenuOpen && (
+                      <div className="absolute left-full top-0 ml-1.5 w-36 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-40 p-1.5 animate-fade-in">
+                        {THEME_OPTIONS.map(opt => {
+                          const Icon = opt.icon
+                          const isSelected = theme === opt.id
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => {
+                                setTheme(opt.id)
+                                setProfileMenuOpen(false)
+                                setThemeMenuOpen(false)
+                              }}
+                              className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
+                                  ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white font-bold'
+                                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                                }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <Icon className="w-3.5 h-3.5" />
+                                <span>{opt.label}</span>
+                              </div>
+                              {isSelected && <Check className="w-3.5 h-3.5" />}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
       </aside>
@@ -767,15 +916,6 @@ export default function Dashboard() {
         {/* Decorative background glows */}
         <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-violet-500/5 blur-[100px] pointer-events-none" />
         <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-cyan-500/5 blur-[100px] pointer-events-none" />
-
-        {/* Theme Toggle Button */}
-        <button
-          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-          className="absolute top-4 right-4 z-50 p-2.5 rounded-xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/80 dark:border-slate-800/80 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 shadow-sm transition-all cursor-pointer"
-          title="Toggle Theme"
-        >
-          {theme === 'dark' ? <Sun className="w-4.5 h-4.5" /> : <Moon className="w-4.5 h-4.5" />}
-        </button>
 
         {/* Top Navigation Bar (Only visible when sidebar is closed on mobile) */}
         {!sidebarOpen && (
@@ -1101,8 +1241,8 @@ export default function Dashboard() {
 
       {/* MODALS */}
 
-      {/* Knowledge Base Drawer */}
-      {showKnowledgeBase && (
+      {/* Memory Drawer */}
+      {showMemory && (
         <div className="fixed inset-0 z-[100] flex justify-end bg-slate-900/40 backdrop-blur-sm animate-fade-in">
           <div className="w-full max-w-md h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col">
             {/* Header */}
@@ -1112,49 +1252,49 @@ export default function Dashboard() {
                   <Database className="w-5 h-5 text-white" />
                 </div>
                 <div>
-                  <h2 className="font-bold text-base text-slate-800 dark:text-slate-100">My Knowledge Base</h2>
-                  <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Documents the AI can access</span>
+                  <h2 className="font-bold text-base text-slate-800 dark:text-slate-100">Memory</h2>
+                  <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Facts the AI remembers about you</span>
                 </div>
               </div>
               <button
-                onClick={() => setShowKnowledgeBase(false)}
+                onClick={() => setShowMemory(false)}
                 className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Document List */}
+            {/* Fact List */}
             <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
-              {loadingDocuments ? (
+              {loadingMemory ? (
                 <div className="flex flex-col gap-2">
                   <div className="h-14 bg-slate-100 dark:bg-slate-800/50 rounded-xl animate-pulse" />
                   <div className="h-14 bg-slate-100 dark:bg-slate-800/50 rounded-xl animate-pulse" />
                   <div className="h-14 bg-slate-100 dark:bg-slate-800/50 rounded-xl animate-pulse" />
                 </div>
-              ) : documents.length === 0 ? (
+              ) : memoryFacts.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full text-center px-6 py-16">
-                  <FileText className="w-10 h-10 text-slate-300 dark:text-slate-700 mb-3" />
-                  <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">No documents yet</p>
-                  <p className="text-xs text-slate-400 mt-1">Attach a PDF in chat to add it to your knowledge base.</p>
+                  <Database className="w-10 h-10 text-slate-300 dark:text-slate-700 mb-3" />
+                  <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">Nothing remembered yet</p>
+                  <p className="text-xs text-slate-400 mt-1">Facts you share in chat (e.g. where you work) will show up here.</p>
                 </div>
               ) : (
-                documents.map(doc => (
+                memoryFacts.map(fact => (
                   <div
-                    key={doc.document_name}
+                    key={fact.id}
                     className="group flex items-center justify-between p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800/70 transition-all"
                   >
                     <div className="flex items-center gap-2.5 overflow-hidden">
-                      <FileText className="w-4.5 h-4.5 text-violet-500 flex-shrink-0" />
+                      <Database className="w-4.5 h-4.5 text-violet-500 flex-shrink-0" />
                       <div className="flex flex-col overflow-hidden">
-                        <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{doc.document_name}</span>
-                        <span className="text-[10px] text-slate-400">{doc.chunk_count} chunk{doc.chunk_count !== 1 ? 's' : ''}</span>
+                        <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{fact.fact}</span>
+                        <span className="text-[10px] text-slate-400">{new Date(fact.created_at).toLocaleDateString()}</span>
                       </div>
                     </div>
                     <button
-                      onClick={() => setDocumentToDelete(doc.document_name)}
+                      onClick={() => setMemoryToDelete(fact.id)}
                       className="p-1.5 hover:bg-rose-50 dark:hover:bg-rose-500/10 rounded-lg text-slate-400 hover:text-rose-500 transition-all cursor-pointer flex-shrink-0"
-                      title="Delete document"
+                      title="Delete fact"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1166,32 +1306,32 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Delete Document Confirmation Modal */}
-      {documentToDelete && (
+      {/* Delete Memory Fact Confirmation Modal */}
+      {memoryToDelete && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm animate-fade-in">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 max-w-sm w-full shadow-2xl scale-100 transition-all">
             <div className="flex flex-col items-center text-center">
               <div className="w-12 h-12 bg-rose-100 dark:bg-rose-500/20 rounded-full flex items-center justify-center mb-4">
                 <AlertTriangle className="w-6 h-6 text-rose-500" />
               </div>
-              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-2">Delete Document</h3>
+              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-2">Delete Fact</h3>
               <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-                Remove <span className="font-semibold text-slate-700 dark:text-slate-300">{documentToDelete}</span> from your knowledge base? The AI will no longer be able to reference it.
+                Remove this fact from memory? The AI will no longer take it into account in any chat.
               </p>
               <div className="flex w-full gap-3">
                 <button
-                  onClick={() => setDocumentToDelete(null)}
-                  disabled={deletingDocument}
+                  onClick={() => setMemoryToDelete(null)}
+                  disabled={deletingMemory}
                   className="flex-1 py-2.5 px-4 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl transition-all cursor-pointer disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
-                  onClick={confirmDeleteDocument}
-                  disabled={deletingDocument}
+                  onClick={confirmDeleteMemory}
+                  disabled={deletingMemory}
                   className="flex-1 py-2.5 px-4 bg-rose-500 hover:bg-rose-600 text-white font-semibold rounded-xl transition-all shadow-md cursor-pointer disabled:opacity-50"
                 >
-                  {deletingDocument ? 'Deleting...' : 'Delete'}
+                  {deletingMemory ? 'Deleting...' : 'Delete'}
                 </button>
               </div>
             </div>
