@@ -61,10 +61,9 @@ interface Message {
   attachedFileName?: string
 }
 
-interface MemoryFact {
-  id: string
-  fact: string
-  created_at: string
+interface MemoryProfile {
+  narrative: string
+  updated_at: string | null
 }
 
 const THEME_OPTIONS = [
@@ -113,9 +112,9 @@ export default function Dashboard() {
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [attachedFile, setAttachedFile] = useState<File | null>(null)
   const [showMemory, setShowMemory] = useState(false)
-  const [memoryFacts, setMemoryFacts] = useState<MemoryFact[]>([])
+  const [memoryProfile, setMemoryProfile] = useState<MemoryProfile>({ narrative: '', updated_at: null })
   const [loadingMemory, setLoadingMemory] = useState(false)
-  const [memoryToDelete, setMemoryToDelete] = useState<string | null>(null)
+  const [showClearMemoryConfirm, setShowClearMemoryConfirm] = useState(false)
   const [deletingMemory, setDeletingMemory] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -399,7 +398,7 @@ export default function Dashboard() {
       if (!response.ok) throw new Error('Failed to fetch memory.')
 
       const data = await response.json()
-      setMemoryFacts(data.facts || [])
+      setMemoryProfile({ narrative: data.narrative || '', updated_at: data.updated_at || null })
     } catch (err) {
       console.error('Error fetching memory:', err)
     } finally {
@@ -413,24 +412,23 @@ export default function Dashboard() {
   }
 
   const confirmDeleteMemory = async () => {
-    if (!memoryToDelete) return
     setDeletingMemory(true)
     try {
       const { data: { session } } = await supabase.auth.getSession()
       const token = session?.access_token || ''
 
-      const response = await fetch(`/api/memory/${encodeURIComponent(memoryToDelete)}`, {
+      const response = await fetch('/api/memory', {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       })
-      if (!response.ok) throw new Error('Failed to delete memory fact.')
+      if (!response.ok) throw new Error('Failed to clear memory profile.')
 
-      setMemoryFacts(prev => prev.filter(f => f.id !== memoryToDelete))
+      setMemoryProfile({ narrative: '', updated_at: null })
     } catch (err) {
-      console.error('Error deleting memory fact:', err)
+      console.error('Error clearing memory profile:', err)
     } finally {
       setDeletingMemory(false)
-      setMemoryToDelete(null)
+      setShowClearMemoryConfirm(false)
     }
   }
 
@@ -1253,7 +1251,7 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <h2 className="font-bold text-base text-slate-800 dark:text-slate-100">Memory</h2>
-                  <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Facts the AI remembers about you</span>
+                  <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Your continuous profile</span>
                 </div>
               </div>
               <button
@@ -1264,63 +1262,60 @@ export default function Dashboard() {
               </button>
             </div>
 
-            {/* Fact List */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
+            {/* Narrative Profile */}
+            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
               {loadingMemory ? (
                 <div className="flex flex-col gap-2">
-                  <div className="h-14 bg-slate-100 dark:bg-slate-800/50 rounded-xl animate-pulse" />
-                  <div className="h-14 bg-slate-100 dark:bg-slate-800/50 rounded-xl animate-pulse" />
-                  <div className="h-14 bg-slate-100 dark:bg-slate-800/50 rounded-xl animate-pulse" />
+                  <div className="h-4 bg-slate-100 dark:bg-slate-800/50 rounded animate-pulse" />
+                  <div className="h-4 bg-slate-100 dark:bg-slate-800/50 rounded animate-pulse" />
+                  <div className="h-4 w-2/3 bg-slate-100 dark:bg-slate-800/50 rounded animate-pulse" />
                 </div>
-              ) : memoryFacts.length === 0 ? (
+              ) : !memoryProfile.narrative ? (
                 <div className="flex flex-col items-center justify-center h-full text-center px-6 py-16">
                   <Database className="w-10 h-10 text-slate-300 dark:text-slate-700 mb-3" />
                   <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">Nothing remembered yet</p>
-                  <p className="text-xs text-slate-400 mt-1">Facts you share in chat (e.g. where you work) will show up here.</p>
+                  <p className="text-xs text-slate-400 mt-1">As you chat, the AI builds an evolving profile of you here (role, projects, tech stack, goals).</p>
                 </div>
               ) : (
-                memoryFacts.map(fact => (
-                  <div
-                    key={fact.id}
-                    className="group flex items-center justify-between p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800/70 transition-all"
-                  >
-                    <div className="flex items-center gap-2.5 overflow-hidden">
-                      <Database className="w-4.5 h-4.5 text-violet-500 flex-shrink-0" />
-                      <div className="flex flex-col overflow-hidden">
-                        <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">{fact.fact}</span>
-                        <span className="text-[10px] text-slate-400">{new Date(fact.created_at).toLocaleDateString()}</span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setMemoryToDelete(fact.id)}
-                      className="p-1.5 hover:bg-rose-50 dark:hover:bg-rose-500/10 rounded-lg text-slate-400 hover:text-rose-500 transition-all cursor-pointer flex-shrink-0"
-                      title="Delete fact"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))
+                <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40">
+                  <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{memoryProfile.narrative}</p>
+                  {memoryProfile.updated_at && (
+                    <p className="text-[10px] text-slate-400 mt-3">Last updated {new Date(memoryProfile.updated_at).toLocaleString()}</p>
+                  )}
+                </div>
               )}
             </div>
+
+            {memoryProfile.narrative && (
+              <div className="p-4 border-t border-slate-200 dark:border-slate-800">
+                <button
+                  onClick={() => setShowClearMemoryConfirm(true)}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-sm font-semibold text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 transition-all cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Clear Memory
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Delete Memory Fact Confirmation Modal */}
-      {memoryToDelete && (
+      {/* Clear Memory Confirmation Modal */}
+      {showClearMemoryConfirm && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm animate-fade-in">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 max-w-sm w-full shadow-2xl scale-100 transition-all">
             <div className="flex flex-col items-center text-center">
               <div className="w-12 h-12 bg-rose-100 dark:bg-rose-500/20 rounded-full flex items-center justify-center mb-4">
                 <AlertTriangle className="w-6 h-6 text-rose-500" />
               </div>
-              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-2">Delete Fact</h3>
+              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-2">Clear Memory</h3>
               <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-                Remove this fact from memory? The AI will no longer take it into account in any chat.
+                Erase your entire memory profile? The AI will no longer take it into account in any chat.
               </p>
               <div className="flex w-full gap-3">
                 <button
-                  onClick={() => setMemoryToDelete(null)}
+                  onClick={() => setShowClearMemoryConfirm(false)}
                   disabled={deletingMemory}
                   className="flex-1 py-2.5 px-4 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl transition-all cursor-pointer disabled:opacity-50"
                 >
@@ -1331,7 +1326,7 @@ export default function Dashboard() {
                   disabled={deletingMemory}
                   className="flex-1 py-2.5 px-4 bg-rose-500 hover:bg-rose-600 text-white font-semibold rounded-xl transition-all shadow-md cursor-pointer disabled:opacity-50"
                 >
-                  {deletingMemory ? 'Deleting...' : 'Delete'}
+                  {deletingMemory ? 'Clearing...' : 'Clear'}
                 </button>
               </div>
             </div>

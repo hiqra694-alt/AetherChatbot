@@ -5,8 +5,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from supabase import create_client, Client, ClientOptions
 
 from core.config import get_settings
-from api.memory.schemas import MemoryDeleteResponse, MemoryListResponse
-from api.memory.services import delete_user_memory, list_user_memory
+from api.memory.schemas import MemoryDeleteResponse, MemoryProfileResponse
+from api.memory.services import delete_user_memory, get_user_memory
 
 logger = logging.getLogger(__name__)
 
@@ -44,40 +44,36 @@ async def get_authenticated_supabase(authorization: Optional[str] = Header(None)
     return supabase, user_res.user.id
 
 
-@router.get("", response_model=MemoryListResponse)
+@router.get("", response_model=MemoryProfileResponse)
 async def get_memory(auth: Tuple[Client, str] = Depends(get_authenticated_supabase)):
     """
-    Lists every durable fact the AI has stored about the authenticated user,
-    across all of their chat sessions.
+    Returns the single, continuously-evolving narrative profile the AI has
+    built about the authenticated user, across all of their chat sessions.
     """
     supabase, user_id = auth
 
     try:
-        facts = await list_user_memory(supabase, user_id)
+        profile = await get_user_memory(supabase, user_id)
     except Exception as db_err:
-        logger.error(f"Failed to list memory for user {user_id}: {db_err}")
+        logger.error(f"Failed to fetch memory profile for user {user_id}: {db_err}")
         raise HTTPException(status_code=500, detail="Failed to fetch memory. Please try again later.")
 
-    return MemoryListResponse(facts=facts)
+    if not profile:
+        return MemoryProfileResponse()
+    return MemoryProfileResponse(narrative=profile.narrative, updated_at=profile.updated_at)
 
 
-@router.delete("/{memory_id}", response_model=MemoryDeleteResponse)
-async def delete_memory(
-    memory_id: str,
-    auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
-):
+@router.delete("", response_model=MemoryDeleteResponse)
+async def delete_memory(auth: Tuple[Client, str] = Depends(get_authenticated_supabase)):
     """
-    Deletes a single stored fact belonging to the authenticated user.
+    Clears the authenticated user's entire memory profile.
     """
     supabase, user_id = auth
 
     try:
-        deleted = await delete_user_memory(supabase, user_id, memory_id)
+        deleted = await delete_user_memory(supabase, user_id)
     except Exception as db_err:
-        logger.error(f"Failed to delete memory fact '{memory_id}' for user {user_id}: {db_err}")
-        raise HTTPException(status_code=500, detail="Failed to delete fact. Please try again later.")
+        logger.error(f"Failed to delete memory profile for user {user_id}: {db_err}")
+        raise HTTPException(status_code=500, detail="Failed to delete memory. Please try again later.")
 
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Memory fact '{memory_id}' not found.")
-
-    return MemoryDeleteResponse(id=memory_id, deleted=True)
+    return MemoryDeleteResponse(deleted=deleted)

@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.chat.schemas import Message
 from api.chat.services import ChatService, SYSTEM_PROMPT
-from api.memory.schemas import MemoryFact
+from api.memory.schemas import UserMemoryProfile
 from providers.mock import MockProvider
 
 
@@ -720,17 +720,18 @@ async def test_generate_and_store_title_never_raises_on_provider_failure(monkeyp
 @pytest.mark.asyncio
 async def test_build_system_prompt_injects_user_memory(monkeypatch):
     """
-    Gemini-style global memory: stored facts must be injected into the
-    system prompt on every turn, independent of whether a document is
-    attached, and without mutating the shared SYSTEM_PROMPT singleton.
+    Continuous memory profile: the user's single narrative paragraph must be
+    injected into the system prompt on every turn, independent of whether a
+    document is attached, and without mutating the shared SYSTEM_PROMPT
+    singleton.
     """
-    fake_facts = [MemoryFact(id="1", fact="Works at Zylo", created_at="2026-07-23T10:00:00Z")]
+    fake_profile = UserMemoryProfile(narrative="Works at Zylo as a backend engineer.", updated_at="2026-07-23T10:00:00Z")
 
-    async def fake_list_user_memory(supabase, user_id):
+    async def fake_get_user_memory(supabase, user_id):
         assert user_id == "user-123"
-        return fake_facts
+        return fake_profile
 
-    monkeypatch.setattr("api.chat.services.list_user_memory", fake_list_user_memory)
+    monkeypatch.setattr("api.chat.services.get_user_memory", fake_get_user_memory)
 
     mock_supabase = MagicMock()
     system_message = await ChatService._build_system_prompt(mock_supabase, "user-123", "test_sess", "hello")
@@ -738,17 +739,17 @@ async def test_build_system_prompt_injects_user_memory(monkeypatch):
     assert system_message is not SYSTEM_PROMPT
     assert system_message.content.startswith(SYSTEM_PROMPT.content)
     assert "<user_memory>" in system_message.content
-    assert "Works at Zylo" in system_message.content
+    assert "Works at Zylo as a backend engineer." in system_message.content
     # The shared singleton must never be mutated by this injection.
     assert "Works at Zylo" not in SYSTEM_PROMPT.content
 
 
 @pytest.mark.asyncio
 async def test_build_system_prompt_returns_singleton_when_no_memory_or_document(monkeypatch):
-    async def fake_list_user_memory(supabase, user_id):
-        return []
+    async def fake_get_user_memory(supabase, user_id):
+        return None
 
-    monkeypatch.setattr("api.chat.services.list_user_memory", fake_list_user_memory)
+    monkeypatch.setattr("api.chat.services.get_user_memory", fake_get_user_memory)
 
     mock_supabase = MagicMock()
     system_message = await ChatService._build_system_prompt(mock_supabase, "user-123", "test_sess", "hello")
@@ -761,7 +762,7 @@ async def test_build_system_prompt_memory_failure_falls_back_to_singleton(monkey
     async def raise_error(supabase, user_id):
         raise RuntimeError("db unavailable")
 
-    monkeypatch.setattr("api.chat.services.list_user_memory", raise_error)
+    monkeypatch.setattr("api.chat.services.get_user_memory", raise_error)
 
     mock_supabase = MagicMock()
     system_message = await ChatService._build_system_prompt(mock_supabase, "user-123", "test_sess", "hello")
@@ -770,23 +771,50 @@ async def test_build_system_prompt_memory_failure_falls_back_to_singleton(monkey
 
 
 @pytest.mark.asyncio
+async def test_build_system_prompt_document_retrieval_failure_falls_back_to_empty_context(monkeypatch):
+    """
+    Regression coverage for the StreamReset/500 bug: a document vector
+    search failure (embedding call or Supabase RPC raising, e.g. an HTTP/2
+    StreamReset) must degrade to an empty context rather than propagating
+    out of _build_system_prompt and crashing the chat stream.
+    """
+    async def fake_get_user_memory(supabase, user_id):
+        return None
+
+    async def raise_stream_reset(supabase, query, user_id, session_id, top_k=3, document_name=None):
+        raise RuntimeError("StreamReset: stream reset by peer")
+
+    monkeypatch.setattr("api.chat.services.get_user_memory", fake_get_user_memory)
+    monkeypatch.setattr("api.chat.services.get_relevant_context", raise_stream_reset)
+
+    mock_supabase = MagicMock()
+    system_message = await ChatService._build_system_prompt(
+        mock_supabase, "user-123", "test_sess", "summarize the pdf", document_name="cv.pdf"
+    )
+
+    # No exception propagated, and the failure degrades all the way back to
+    # the untouched singleton since neither block produced any content.
+    assert system_message is SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
 async def test_build_system_prompt_combines_memory_and_document_context(monkeypatch):
     """
     Both blocks are independently optional and strictly additive -- when a
-    file is attached AND the user has stored memory facts, both must appear
-    in the same generated system prompt.
+    file is attached AND the user has a stored memory profile, both must
+    appear in the same generated system prompt.
     """
     from api.documents.schemas import RetrievedChunk
 
-    fake_facts = [MemoryFact(id="1", fact="Prefers concise answers", created_at="2026-07-23T10:00:00Z")]
+    fake_profile = UserMemoryProfile(narrative="Prefers concise answers.", updated_at="2026-07-23T10:00:00Z")
 
-    async def fake_list_user_memory(supabase, user_id):
-        return fake_facts
+    async def fake_get_user_memory(supabase, user_id):
+        return fake_profile
 
     async def fake_get_relevant_context(supabase, query, user_id, session_id, top_k=3, document_name=None):
         return [RetrievedChunk(document_name=document_name, chunk_text="CV chunk text", similarity=0.9)]
 
-    monkeypatch.setattr("api.chat.services.list_user_memory", fake_list_user_memory)
+    monkeypatch.setattr("api.chat.services.get_user_memory", fake_get_user_memory)
     monkeypatch.setattr("api.chat.services.get_relevant_context", fake_get_relevant_context)
 
     mock_supabase = MagicMock()
@@ -795,6 +823,6 @@ async def test_build_system_prompt_combines_memory_and_document_context(monkeypa
     )
 
     assert "<user_memory>" in system_message.content
-    assert "Prefers concise answers" in system_message.content
+    assert "Prefers concise answers." in system_message.content
     assert "<knowledge_base_context>" in system_message.content
     assert "CV chunk text" in system_message.content

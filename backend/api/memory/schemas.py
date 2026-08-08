@@ -1,29 +1,32 @@
 from datetime import datetime
-from typing import List
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
-class MemoryFact(BaseModel):
+class UserMemoryProfile(BaseModel):
     """
-    A single persistent fact/preference the AI has learned about the user,
-    stored in `user_memory` and injected into every chat's system prompt
-    regardless of session (unlike per-session document_chunks).
+    The single, continuously-evolving narrative paragraph the AI maintains
+    about a user -- one row per user_id in `user_memory`, upserted (never
+    appended to) on every turn that reveals a new durable fact, and injected
+    into every chat's system prompt regardless of session.
     """
-    id: str = Field(..., description="Primary key of the stored fact")
-    fact: str = Field(..., description="The extracted fact or preference text")
-    created_at: datetime = Field(..., description="When this fact was first stored")
+    narrative: str = Field(..., description="The cohesive, evolving profile paragraph")
+    updated_at: datetime = Field(..., description="When this profile was last rewritten")
 
 
-class MemoryListResponse(BaseModel):
+class MemoryProfileResponse(BaseModel):
     """
-    Payload for GET /api/memory — the authenticated user's stored facts.
+    Payload for GET /api/memory -- the authenticated user's current memory
+    profile. `narrative` is empty and `updated_at` is None when nothing has
+    been learned about the user yet.
     """
-    facts: List[MemoryFact] = Field(default_factory=list)
+    narrative: str = ""
+    updated_at: Optional[datetime] = None
 
 
 class MemoryDeleteResponse(BaseModel):
     """
-    Payload for DELETE /api/memory/{memory_id} — confirms the fact was removed.
+    Payload for DELETE /api/memory -- confirms whether a stored profile
+    existed and was cleared.
     """
-    id: str = Field(..., description="ID of the deleted fact")
-    deleted: bool = Field(..., description="Whether a row was actually removed")
+    deleted: bool = Field(..., description="Whether a profile row existed and was removed")

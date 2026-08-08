@@ -1,16 +1,18 @@
+import asyncio
 import json
 import logging
 import re
 import uuid
-from typing import AsyncGenerator, Callable, Awaitable, Optional
+from typing import AsyncGenerator, Callable, Awaitable, List, Optional
 from fastapi import HTTPException
 from supabase import Client
 from api.chat.schemas import Message, ProviderEnum
 from providers.factory import ProviderFactory
 from providers.base import BaseProvider
 from api.chat.tools import ALL_TOOLS, execute_tool, repair_tool_arguments
+from api.documents.schemas import RetrievedChunk
 from api.documents.services import format_retrieved_chunks, get_relevant_context
-from api.memory.services import format_memory_for_prompt, list_user_memory
+from api.memory.services import format_memory_for_prompt, get_user_memory
 
 logger = logging.getLogger(__name__)
 
@@ -232,28 +234,61 @@ class ChatService:
     @staticmethod
     async def _build_memory_block(supabase: Client, user_id: Optional[str]) -> str:
         """
-        Fetches every durable fact stored in `user_memory` for `user_id` (the
-        Gemini-style global memory, independent of session_id) and renders it
-        as a system-prompt block. Runs on every turn, not just when a file is
-        attached, since these facts are meant to be available across all of
-        the user's chats. Retrieval failures (no facts yet, DB hiccup) are
-        swallowed and degrade to "no memory this turn" -- memory must never
-        be a point of failure for chat, same contract as document retrieval
-        below.
+        Fetches the single, continuously-evolving narrative profile stored in
+        `user_memory` for `user_id` (Gemini-style global memory, independent
+        of session_id) and renders it as a system-prompt block. Runs on every
+        turn, not just when a file is attached, since this profile is meant
+        to be available across all of the user's chats. Retrieval failures
+        (no profile yet, DB hiccup) are swallowed and degrade to "no memory
+        this turn" -- memory must never be a point of failure for chat, same
+        contract as document retrieval below.
         """
         if not user_id:
             return ""
 
         try:
-            facts = await list_user_memory(supabase, user_id)
+            profile = await get_user_memory(supabase, user_id)
         except Exception as mem_err:
             logger.warning(f"User memory retrieval failed, continuing without it: {mem_err}")
             return ""
 
-        if not facts:
+        narrative = format_memory_for_prompt(profile)
+        if not narrative:
             return ""
 
-        return "\n\n<user_memory>\n" + format_memory_for_prompt(facts) + "\n</user_memory>"
+        return "\n\n<user_memory>\n" + narrative + "\n</user_memory>"
+
+    @staticmethod
+    async def _fetch_document_context(
+        supabase: Client,
+        user_id: Optional[str],
+        session_id: str,
+        user_message: str,
+        document_name: Optional[str],
+    ) -> List[RetrievedChunk]:
+        """
+        BRANCH A ONLY (a file was attached in this request, so `document_name`
+        is set): retrieves that document's chunks -- scoped to both `user_id`
+        and `session_id` (Context Isolation) -- so generation is
+        deterministically grounded in the just-uploaded file.
+
+        The underlying vector search issues a Voyage AI embedding call and a
+        Supabase RPC round trip, either of which can fail outright (rate
+        limit, network error) or stall and get reset by an intermediary --
+        observed in production as an HTTP/2 StreamReset while querying
+        session-scoped chunks, which previously escaped as an unhandled 500
+        on the chat endpoint. Both failure modes are caught here and degrade
+        to an empty context (with a logged warning) rather than propagating
+        -- retrieval must never crash the chat stream.
+        """
+        if not (user_id and document_name and user_message.strip()):
+            return []
+
+        try:
+            return await get_relevant_context(supabase, user_message, user_id, session_id, document_name=document_name)
+        except Exception as context_err:
+            logger.warning(f"Document context retrieval failed, continuing without it: {context_err}")
+            return []
 
     @staticmethod
     async def _build_system_prompt(
@@ -267,19 +302,23 @@ class ChatService:
         Builds this turn's system prompt as SYSTEM_PROMPT plus two strictly
         additive, independently-optional blocks:
 
-        1. User memory (see _build_memory_block): durable cross-session facts,
-           fetched on every turn regardless of whether a file is attached.
+        1. User memory (see _build_memory_block): the user's continuous
+           narrative profile, fetched on every turn regardless of whether a
+           file is attached.
 
-        2. Document context, BRANCH A ONLY (a file was attached in this
-           request, so `document_name` is set): immediately retrieves that
-           document's chunks -- scoped to both `user_id` and `session_id`
-           (Context Isolation) -- and injects them so generation is
+        2. Document context (see _fetch_document_context), BRANCH A ONLY (a
+           file was attached in this request): injected so generation is
            deterministically grounded in the just-uploaded file. BRANCH B (no
-           file attached) does NOT call get_relevant_context here; retrieval
-           in that case is agentic, only happening if the model itself calls
+           file attached) does NOT fetch document context here; retrieval in
+           that case is agentic, only happening if the model itself calls
            the `search_knowledge_base` tool (see api.chat.tools), so a plain
            conversational turn never pays for an unnecessary Voyage/Supabase
            round trip.
+
+        The two blocks are fetched concurrently via asyncio.gather rather
+        than sequentially -- the user-memory DB read and the document vector
+        search don't depend on each other's results, so running them one
+        after another only adds latency before the first token can stream.
 
         Never mutates the shared SYSTEM_PROMPT singleton, since that object
         is reused across every concurrent request/user -- if neither block
@@ -288,18 +327,15 @@ class ChatService:
         retrieval failures so grounding stays strictly additive, never a
         point of failure for chat.
         """
-        additions = await ChatService._build_memory_block(supabase, user_id)
+        memory_block, chunks = await asyncio.gather(
+            ChatService._build_memory_block(supabase, user_id),
+            ChatService._fetch_document_context(supabase, user_id, session_id, user_message, document_name),
+        )
 
-        if user_id and document_name and user_message.strip():
-            try:
-                chunks = await get_relevant_context(supabase, user_message, user_id, session_id, document_name=document_name)
-            except Exception as context_err:
-                logger.warning(f"Document context retrieval failed, continuing without it: {context_err}")
-                chunks = []
-
-            if chunks:
-                context_blocks = format_retrieved_chunks(chunks)
-                additions += f"\n\n<knowledge_base_context>\n{context_blocks}\n</knowledge_base_context>"
+        additions = memory_block
+        if chunks:
+            context_blocks = format_retrieved_chunks(chunks)
+            additions += f"\n\n<knowledge_base_context>\n{context_blocks}\n</knowledge_base_context>"
 
         if not additions:
             return SYSTEM_PROMPT

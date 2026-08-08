@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Optional, Tuple
@@ -83,17 +84,27 @@ async def chat_endpoint(
         if not file_bytes:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-        try:
-            # Must finish before generation starts so the newly stored chunks
-            # are visible to get_relevant_context() later in this request.
-            # Scoped to sessionId (Context Isolation) so this document is
-            # only ever retrievable from this same chat.
-            chunks_stored = await process_and_store_pdf(supabase, file_bytes, file.filename, user_id, sessionId)
-        except Exception as processing_err:
-            logger.error(f"Failed to process uploaded document '{file.filename}' for user {user_id}: {processing_err}")
+        # process_and_store_pdf and get_history are independent -- file
+        # processing doesn't read history, and history doesn't need the
+        # file -- so they run concurrently instead of paying for both
+        # sequentially, cutting time-to-first-token on message+file turns.
+        # Both must still finish before generation starts: the newly stored
+        # chunks need to be visible to get_relevant_context() later in this
+        # request (scoped to sessionId -- Context Isolation).
+        pdf_result, history_result = await asyncio.gather(
+            process_and_store_pdf(supabase, file_bytes, file.filename, user_id, sessionId),
+            ChatService.get_history(supabase, sessionId),
+            return_exceptions=True,
+        )
+        if isinstance(pdf_result, Exception):
+            logger.error(f"Failed to process uploaded document '{file.filename}' for user {user_id}: {pdf_result}")
             raise HTTPException(status_code=500, detail="Failed to process the uploaded document. Please try again later.")
-
-    history = await ChatService.get_history(supabase, sessionId)
+        if isinstance(history_result, Exception):
+            raise history_result
+        chunks_stored = pdf_result
+        history = history_result
+    else:
+        history = await ChatService.get_history(supabase, sessionId)
     # Captured before this turn's user message is appended below, so it's
     # True only for a session's very first exchange -- title generation
     # should run once per session, not on every subsequent message.

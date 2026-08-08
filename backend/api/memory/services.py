@@ -1,130 +1,133 @@
-import json
 import logging
 import re
-from typing import List, Optional
+from typing import Optional
 
 from supabase import Client
 
 from api.chat.schemas import Message
-from api.memory.schemas import MemoryFact
+from api.memory.schemas import UserMemoryProfile
 from providers.factory import ProviderFactory
 
 logger = logging.getLogger(__name__)
 
-# Facts are extracted with Groq regardless of which provider is driving the
-# actual conversation -- mirrors ChatService.generate_and_store_title: this
-# is a cheap, latency-insensitive background side task, not something the
+# The extraction/rewrite step runs with Groq regardless of which provider is
+# driving the actual conversation -- mirrors ChatService.generate_and_store_title:
+# this is a cheap, latency-insensitive background side task, not something the
 # user should pay a slower/pricier provider's latency for.
 EXTRACTION_PROVIDER = "groq"
 
+# Upsert/Rewrite prompt: the model is handed the user's current profile
+# paragraph plus their latest message and asked to rewrite the whole
+# paragraph, rather than being asked to extract isolated facts as separate
+# JSON list items. This is what keeps user_memory a single, cohesive,
+# evolving narrative instead of an ever-growing set of disconnected rows.
 MEMORY_EXTRACTION_SYSTEM_PROMPT = (
-    "You extract durable, cross-conversation facts about a user from a single chat message. "
-    "A durable fact is something that stays true across future conversations: the user's name, "
-    "employer, job title, location, or an explicit, stable preference (e.g. 'I prefer Python over "
-    "Java', 'I'm vegetarian'). It is NOT a durable fact if it's only true for this one turn or "
-    "conversation (e.g. 'I'm tired today', 'please summarize this', a question, or small talk).\n\n"
-    "Read the user's message below and respond with ONLY a JSON object of the exact shape "
-    '{"facts": ["fact 1", "fact 2"]}, with each fact rewritten as a short, self-contained third-person '
-    "statement (e.g. \"Works at Zylo as a backend engineer\"). If the message contains no durable fact, "
-    'respond with {"facts": []}. Never include anything other than that JSON object in your response.'
+    "You maintain a single, cohesive, continuously-evolving narrative paragraph that acts as "
+    "a profile of a user across every conversation they have -- their role, employer, active "
+    "projects, tech stack, goals, and stable preferences, written in flowing third-person prose "
+    "(never bullet points or a list).\n\n"
+    "You will be given the CURRENT PROFILE (may be empty, if nothing is known yet) and the "
+    "user's LATEST MESSAGE. Rewrite the profile paragraph so it naturally weaves in any new "
+    "durable fact the latest message reveals -- especially an active project, a technology or "
+    "stack they're working with (e.g. FastAPI, React), a goal, an employer or role, or an "
+    "explicit stable preference. Keep everything from the current profile that is still true; "
+    "revise a detail only when the latest message clearly updates or contradicts it. Never fold "
+    "in a transient, one-turn detail (e.g. 'is tired today', a question, small talk) -- those "
+    "are not durable facts.\n\n"
+    "Respond with ONLY the rewritten paragraph: plain prose, no labels, no preamble, no "
+    "surrounding quotes, no markdown, no JSON. If the latest message contains no durable fact, "
+    "respond with the CURRENT PROFILE completely unchanged. If nothing is known yet and the "
+    "latest message has no durable fact either, respond with an empty string."
 )
 
-_JSON_OBJECT_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
+_MARKDOWN_FENCE_PATTERN = re.compile(r"^```(?:\w+)?\s*|\s*```$")
 
 
-def _parse_extracted_facts(raw_text: str) -> List[str]:
+def _clean_narrative_response(raw_text: str) -> str:
     """
-    Parses the extraction model's response into a list of fact strings.
-    Tolerates markdown code fences and any leading/trailing prose a small
-    model might still emit despite the strict-JSON instruction, by falling
-    back to the first {...} substring found. Returns an empty list (never
-    raises) if nothing parseable is found.
+    Cleans the rewrite model's response into the plain-prose paragraph it
+    was asked for, tolerating markdown code fences or surrounding quotes a
+    small model might still emit despite the strict "plain prose only"
+    instruction. Never raises -- an unparseable/empty response just yields
+    an empty string, which the caller treats as "no update this turn".
     """
     text = raw_text.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-
-    candidates = [text]
-    match = _JSON_OBJECT_PATTERN.search(text)
-    if match:
-        candidates.append(match.group(0))
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(parsed, dict) and isinstance(parsed.get("facts"), list):
-            return [str(f).strip() for f in parsed["facts"] if str(f).strip()]
-
-    return []
+    text = _MARKDOWN_FENCE_PATTERN.sub("", text).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+        text = text[1:-1].strip()
+    return text
 
 
-async def list_user_memory(supabase: Client, user_id: str) -> List[MemoryFact]:
+async def get_user_memory(supabase: Client, user_id: str) -> Optional[UserMemoryProfile]:
     """
-    Lists every fact stored for `user_id`, most recent first. RLS on
-    user_memory already restricts rows to this user; the explicit filter is
-    kept for consistency with list_user_documents/list_documents.
+    Fetches the single narrative profile row stored for `user_id`, or None
+    if nothing has been learned about them yet. RLS on user_memory already
+    restricts rows to this user; the explicit filter is kept for consistency
+    with list_user_documents/list_documents.
     """
     res = (
         supabase.table("user_memory")
-        .select("id, fact, created_at")
+        .select("narrative, updated_at")
         .eq("user_id", user_id)
-        .order("created_at", desc=True)
+        .limit(1)
         .execute()
     )
-    return [
-        MemoryFact(id=row["id"], fact=row["fact"], created_at=row["created_at"])
-        for row in (res.data or [])
-    ]
+    rows = res.data or []
+    if not rows or not rows[0].get("narrative"):
+        return None
+    return UserMemoryProfile(narrative=rows[0]["narrative"], updated_at=rows[0]["updated_at"])
 
 
-async def delete_user_memory(supabase: Client, user_id: str, memory_id: str) -> bool:
+async def delete_user_memory(supabase: Client, user_id: str) -> bool:
     """
-    Deletes a single fact belonging to `user_id`. Returns True if a row was
-    actually removed, False if no matching row existed (e.g. already
-    deleted, or belongs to another user and RLS silently excluded it).
+    Clears `user_id`'s entire memory profile. Returns True if a row actually
+    existed and was removed, False if there was nothing stored.
     """
-    res = (
-        supabase.table("user_memory")
-        .delete()
-        .eq("user_id", user_id)
-        .eq("id", memory_id)
-        .execute()
-    )
+    res = supabase.table("user_memory").delete().eq("user_id", user_id).execute()
     return len(res.data or []) > 0
 
 
-def format_memory_for_prompt(facts: List[MemoryFact]) -> str:
+def format_memory_for_prompt(profile: Optional[UserMemoryProfile]) -> str:
     """
-    Renders stored facts for injection into the chat system prompt, one
-    bullet per fact.
+    Renders the stored narrative profile for injection into the chat system
+    prompt as a single flowing paragraph -- not a bullet list, since the
+    profile itself is already cohesive prose.
     """
-    return "\n".join(f"- {fact.fact}" for fact in facts)
+    if not profile or not profile.narrative.strip():
+        return ""
+    return profile.narrative.strip()
 
 
 async def extract_and_store_memory(supabase: Client, user_id: Optional[str], user_message: str) -> None:
     """
     Best-effort background task (scheduled from the chat router after every
-    turn that includes a user message): asks a fast provider whether the
-    user's message stated any durable fact or preference about themselves,
-    and if so, persists each new one to `user_memory`. Facts already present
-    (case-insensitive exact match) are skipped so memory doesn't accumulate
-    duplicate rows across repeated turns.
-
-    Mirrors ChatService.generate_and_store_title's contract: this runs after
-    the user-facing response has already been handled, so it must never
-    raise -- a missing API key, rate limit, malformed JSON from the model, or
-    a DB hiccup should all degrade to "no memory update this turn", not an
-    error anywhere visible to the user.
+    turn that includes a user message): fetches the user's current master
+    memory paragraph, asks a fast provider to rewrite/expand it in light of
+    this turn's message, and upserts the single result back into
+    `user_memory` for that user_id -- never appends a new row. Mirrors
+    ChatService.generate_and_store_title's contract: this runs after the
+    user-facing response has already been handled, so it must never raise --
+    a missing API key, rate limit, malformed response, or a DB hiccup should
+    all degrade to "no memory update this turn", not an error anywhere
+    visible to the user.
     """
     if not user_id or not user_message or not user_message.strip():
         return
 
     try:
+        existing_profile = await get_user_memory(supabase, user_id)
+        existing_narrative = existing_profile.narrative.strip() if existing_profile else ""
+
         provider = ProviderFactory.get_provider(EXTRACTION_PROVIDER)
         extraction_prompt = [
             Message(role="system", content=MEMORY_EXTRACTION_SYSTEM_PROMPT),
-            Message(role="user", content=user_message[:2000]),
+            Message(
+                role="user",
+                content=(
+                    f"CURRENT PROFILE:\n{existing_narrative or '(empty -- nothing known yet)'}\n\n"
+                    f"LATEST MESSAGE:\n{user_message[:2000]}"
+                ),
+            ),
         ]
 
         raw_text = ""
@@ -132,22 +135,16 @@ async def extract_and_store_memory(supabase: Client, user_id: Optional[str], use
             if isinstance(chunk, str):
                 raw_text += chunk
 
-        new_facts = _parse_extracted_facts(raw_text)
-        if not new_facts:
+        new_narrative = _clean_narrative_response(raw_text)
+        if not new_narrative or new_narrative == existing_narrative:
+            # Either the model found no durable fact this turn, or it echoed
+            # the profile back unchanged -- either way, nothing to persist.
             return
 
-        existing = await list_user_memory(supabase, user_id)
-        existing_lower = {f.fact.strip().lower() for f in existing}
-
-        rows = [
-            {"user_id": user_id, "fact": fact}
-            for fact in new_facts
-            if fact.lower() not in existing_lower
-        ]
-        if not rows:
-            return
-
-        supabase.table("user_memory").insert(rows).execute()
-        logger.info(f"Stored {len(rows)} new memory fact(s) for user {user_id}.")
+        supabase.table("user_memory").upsert(
+            {"user_id": user_id, "narrative": new_narrative},
+            on_conflict="user_id",
+        ).execute()
+        logger.info(f"Updated memory profile for user {user_id}.")
     except Exception as mem_err:
         logger.warning(f"Failed to extract/store memory for user {user_id}: {mem_err}")

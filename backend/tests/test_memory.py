@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient  # pyright: ignore [reportMissingImpor
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from main import app  # pyright: ignore [reportMissingImports]
-from api.memory.services import extract_and_store_memory, _parse_extracted_facts  # pyright: ignore [reportMissingImports]
+from api.memory.services import extract_and_store_memory, _clean_narrative_response  # pyright: ignore [reportMissingImports]
 
 client = TestClient(app)
 
@@ -36,14 +36,14 @@ def _make_mock_supabase(auth_user_id="test-user-id"):
 # ==================================================
 
 @patch("api.memory.routers.create_client")
-def test_get_memory_lists_facts(mock_create_client):
+def test_get_memory_returns_narrative(mock_create_client):
     mock_supabase = _make_mock_supabase()
     mock_table = MagicMock()
     mock_table.select.return_value = mock_table
     mock_table.eq.return_value = mock_table
-    mock_table.order.return_value = mock_table
+    mock_table.limit.return_value = mock_table
     mock_res = MagicMock()
-    mock_res.data = [{"id": "1", "fact": "Works at Zylo", "created_at": "2026-07-23T10:00:00Z"}]
+    mock_res.data = [{"narrative": "Works at Zylo as a backend engineer.", "updated_at": "2026-07-23T10:00:00Z"}]
     mock_table.execute.return_value = mock_res
     mock_supabase.table.return_value = mock_table
 
@@ -52,8 +52,29 @@ def test_get_memory_lists_facts(mock_create_client):
     response = client.get("/api/memory", headers={"Authorization": "Bearer fake_token"})
     assert response.status_code == 200
     body = response.json()
-    assert len(body["facts"]) == 1
-    assert body["facts"][0]["fact"] == "Works at Zylo"
+    assert body["narrative"] == "Works at Zylo as a backend engineer."
+    assert body["updated_at"] is not None
+
+
+@patch("api.memory.routers.create_client")
+def test_get_memory_returns_empty_when_no_profile_yet(mock_create_client):
+    mock_supabase = _make_mock_supabase()
+    mock_table = MagicMock()
+    mock_table.select.return_value = mock_table
+    mock_table.eq.return_value = mock_table
+    mock_table.limit.return_value = mock_table
+    mock_res = MagicMock()
+    mock_res.data = []
+    mock_table.execute.return_value = mock_res
+    mock_supabase.table.return_value = mock_table
+
+    mock_create_client.return_value = mock_supabase
+
+    response = client.get("/api/memory", headers={"Authorization": "Bearer fake_token"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["narrative"] == ""
+    assert body["updated_at"] is None
 
 
 def test_get_memory_unauthorized():
@@ -63,7 +84,7 @@ def test_get_memory_unauthorized():
 
 
 # ==================================================
-# DELETE /api/memory/{memory_id}
+# DELETE /api/memory
 # ==================================================
 
 def _make_mock_supabase_for_delete(deleted_rows):
@@ -79,111 +100,136 @@ def _make_mock_supabase_for_delete(deleted_rows):
 
 
 @patch("api.memory.routers.create_client")
-def test_delete_memory_success(mock_create_client):
-    mock_create_client.return_value = _make_mock_supabase_for_delete([{"id": "1"}])
+def test_delete_memory_clears_profile(mock_create_client):
+    mock_create_client.return_value = _make_mock_supabase_for_delete([{"user_id": "test-user-id"}])
 
-    response = client.delete("/api/memory/1", headers={"Authorization": "Bearer fake_token"})
+    response = client.delete("/api/memory", headers={"Authorization": "Bearer fake_token"})
     assert response.status_code == 200
     body = response.json()
-    assert body["id"] == "1"
     assert body["deleted"] is True
 
 
 @patch("api.memory.routers.create_client")
-def test_delete_memory_not_found(mock_create_client):
+def test_delete_memory_when_nothing_stored(mock_create_client):
     mock_create_client.return_value = _make_mock_supabase_for_delete([])
 
-    response = client.delete("/api/memory/missing", headers={"Authorization": "Bearer fake_token"})
-    assert response.status_code == 404
+    response = client.delete("/api/memory", headers={"Authorization": "Bearer fake_token"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted"] is False
 
 
 def test_delete_memory_unauthorized():
-    response = client.delete("/api/memory/1")
+    response = client.delete("/api/memory")
     assert response.status_code == 401
 
 
 # ==================================================
-# _parse_extracted_facts
+# _clean_narrative_response
 # ==================================================
 
-def test_parse_extracted_facts_plain_json():
-    assert _parse_extracted_facts('{"facts": ["Works at Zylo"]}') == ["Works at Zylo"]
+def test_clean_narrative_response_plain_prose():
+    assert _clean_narrative_response("Works at Zylo as a backend engineer.") == "Works at Zylo as a backend engineer."
 
 
-def test_parse_extracted_facts_empty_list():
-    assert _parse_extracted_facts('{"facts": []}') == []
+def test_clean_narrative_response_empty():
+    assert _clean_narrative_response("") == ""
+    assert _clean_narrative_response("   ") == ""
 
 
-def test_parse_extracted_facts_garbage_text():
-    assert _parse_extracted_facts("I don't know what you mean.") == []
+def test_clean_narrative_response_strips_markdown_fence():
+    text = "```\nWorks at Zylo as a backend engineer.\n```"
+    assert _clean_narrative_response(text) == "Works at Zylo as a backend engineer."
 
 
-def test_parse_extracted_facts_extracts_embedded_json():
-    text = 'Sure! Here you go: {"facts": ["Works at Acme"]} Hope that helps.'
-    assert _parse_extracted_facts(text) == ["Works at Acme"]
-
-
-def test_parse_extracted_facts_strips_markdown_fence():
-    text = '```json\n{"facts": ["Lives in Lahore"]}\n```'
-    assert _parse_extracted_facts(text) == ["Lives in Lahore"]
+def test_clean_narrative_response_strips_surrounding_quotes():
+    assert _clean_narrative_response('"Lives in Lahore."') == "Lives in Lahore."
 
 
 # ==================================================
 # extract_and_store_memory
 # ==================================================
 
-def _make_mock_supabase_for_extraction(existing_rows):
+def _make_mock_supabase_for_extraction(existing_narrative_rows):
     mock_supabase = MagicMock()
     mock_table = MagicMock()
     mock_table.select.return_value = mock_table
     mock_table.eq.return_value = mock_table
-    mock_table.order.return_value = mock_table
-    mock_table.insert.return_value = mock_table
+    mock_table.limit.return_value = mock_table
+    mock_table.upsert.return_value = mock_table
     mock_res = MagicMock()
-    mock_res.data = existing_rows
+    mock_res.data = existing_narrative_rows
     mock_table.execute.return_value = mock_res
     mock_supabase.table.return_value = mock_table
     return mock_supabase, mock_table
 
 
 @pytest.mark.asyncio
-async def test_extract_and_store_memory_stores_new_fact(monkeypatch):
-    fake_provider = FakeExtractionProvider('{"facts": ["Works at Zylo as a backend engineer"]}')
+async def test_extract_and_store_memory_writes_first_profile(monkeypatch):
+    fake_provider = FakeExtractionProvider("Works at Zylo as a backend engineer.")
     monkeypatch.setattr("api.memory.services.ProviderFactory.get_provider", lambda name: fake_provider)
 
-    mock_supabase, mock_table = _make_mock_supabase_for_extraction(existing_rows=[])
+    mock_supabase, mock_table = _make_mock_supabase_for_extraction(existing_narrative_rows=[])
 
     await extract_and_store_memory(mock_supabase, "user-123", "I work at Zylo as a backend engineer")
 
-    mock_table.insert.assert_called_once_with(
-        [{"user_id": "user-123", "fact": "Works at Zylo as a backend engineer"}]
+    mock_table.upsert.assert_called_once_with(
+        {"user_id": "user-123", "narrative": "Works at Zylo as a backend engineer."},
+        on_conflict="user_id",
     )
 
 
 @pytest.mark.asyncio
-async def test_extract_and_store_memory_dedupes_case_insensitively(monkeypatch):
-    fake_provider = FakeExtractionProvider('{"facts": ["works at zylo"]}')
+async def test_extract_and_store_memory_rewrites_existing_profile_via_upsert(monkeypatch):
+    """
+    The Upsert/Rewrite pattern: an existing profile is passed to the
+    extraction prompt and the (expanded) rewrite is upserted back onto the
+    same user_id row -- never inserted as an additional row.
+    """
+    fake_provider = FakeExtractionProvider("Works at Zylo as a backend engineer. Is currently building a FastAPI service.")
     monkeypatch.setattr("api.memory.services.ProviderFactory.get_provider", lambda name: fake_provider)
 
     mock_supabase, mock_table = _make_mock_supabase_for_extraction(
-        existing_rows=[{"id": "1", "fact": "Works at Zylo", "created_at": "2026-07-23T10:00:00Z"}]
+        existing_narrative_rows=[{"narrative": "Works at Zylo as a backend engineer.", "updated_at": "2026-07-23T10:00:00Z"}]
     )
 
-    await extract_and_store_memory(mock_supabase, "user-123", "I still work at zylo")
+    await extract_and_store_memory(mock_supabase, "user-123", "I'm building a FastAPI service right now")
 
     mock_table.insert.assert_not_called()
+    mock_table.upsert.assert_called_once_with(
+        {"user_id": "user-123", "narrative": "Works at Zylo as a backend engineer. Is currently building a FastAPI service."},
+        on_conflict="user_id",
+    )
 
 
 @pytest.mark.asyncio
-async def test_extract_and_store_memory_no_facts_skips_db_entirely(monkeypatch):
-    fake_provider = FakeExtractionProvider('{"facts": []}')
+async def test_extract_and_store_memory_skips_write_when_profile_unchanged(monkeypatch):
+    """
+    When the rewrite model echoes the current profile back unchanged (no new
+    durable fact this turn), no DB write should happen at all.
+    """
+    fake_provider = FakeExtractionProvider("Works at Zylo as a backend engineer.")
     monkeypatch.setattr("api.memory.services.ProviderFactory.get_provider", lambda name: fake_provider)
 
-    mock_supabase = MagicMock()
+    mock_supabase, mock_table = _make_mock_supabase_for_extraction(
+        existing_narrative_rows=[{"narrative": "Works at Zylo as a backend engineer.", "updated_at": "2026-07-23T10:00:00Z"}]
+    )
 
     await extract_and_store_memory(mock_supabase, "user-123", "what's the weather like today?")
 
-    mock_supabase.table.assert_not_called()
+    mock_table.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extract_and_store_memory_no_facts_skips_db_write(monkeypatch):
+    fake_provider = FakeExtractionProvider("")
+    monkeypatch.setattr("api.memory.services.ProviderFactory.get_provider", lambda name: fake_provider)
+
+    mock_supabase, mock_table = _make_mock_supabase_for_extraction(existing_narrative_rows=[])
+
+    await extract_and_store_memory(mock_supabase, "user-123", "what's the weather like today?")
+
+    mock_table.upsert.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -206,17 +252,18 @@ async def test_extract_and_store_memory_never_raises_on_provider_failure(monkeyp
 @pytest.mark.asyncio
 async def test_extract_and_store_memory_ignores_transient_statements(monkeypatch):
     """
-    The extraction prompt instructs the model to only report durable facts;
-    this test exercises the "no durable fact" response shape end-to-end.
+    The extraction prompt instructs the model to echo the current (empty)
+    profile back unchanged for a transient statement; this test exercises
+    that "no durable fact" response shape end-to-end.
     """
-    fake_provider = FakeExtractionProvider('{"facts": []}')
+    fake_provider = FakeExtractionProvider("")
     monkeypatch.setattr("api.memory.services.ProviderFactory.get_provider", lambda name: fake_provider)
 
-    mock_supabase = MagicMock()
+    mock_supabase, mock_table = _make_mock_supabase_for_extraction(existing_narrative_rows=[])
 
     await extract_and_store_memory(mock_supabase, "user-123", "I'm feeling tired today.")
 
-    mock_supabase.table.assert_not_called()
+    mock_table.upsert.assert_not_called()
 
 
 @pytest.mark.asyncio
