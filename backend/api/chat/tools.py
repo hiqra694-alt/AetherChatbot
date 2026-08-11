@@ -10,6 +10,9 @@ import zoneinfo
 from supabase import Client
 
 from api.documents.services import format_retrieved_chunks, get_relevant_context, list_user_documents
+from api.tasks.services import complete_task as complete_task_row
+from api.tasks.services import create_task as create_task_row
+from api.tasks.services import list_tasks as list_tasks_row
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +197,95 @@ LIST_DOCUMENTS_TOOL = {
     }
 }
 
+CREATE_TASK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "create_task",
+        "description": (
+            "Creates a new task/reminder for the user, optionally with a due date/time. "
+            "WHEN TO USE: the user asks you to remind them of something, or to add or track a task or "
+            "to-do item (e.g. 'remind me to call John tomorrow at 5pm', 'add a task to submit the "
+            "report'). "
+            "WHEN NOT TO USE: listing existing tasks (use list_tasks) or marking one done (use "
+            "complete_task)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short title describing the task or reminder."
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ), e.g. '2026-08-15T17:00:00Z', the "
+                        "task is due at. To schedule a reminder for a specific time, calculate this full "
+                        "timestamp relative to the current date/time given in the system prompt -- never "
+                        "guess a date without anchoring it to that reference point. Omit if there's no "
+                        "specific due date."
+                    )
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional longer description or extra detail about the task."
+                }
+            },
+            "required": ["title"]
+        }
+    }
+}
+
+LIST_TASKS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_tasks",
+        "description": (
+            "Lists the user's tasks/reminders. "
+            "WHEN TO USE: the user asks what tasks/reminders they have, or to see their to-do list "
+            "(e.g. 'what are my pending tasks', 'show me my reminders', 'what have I completed'). "
+            "WHEN NOT TO USE: creating a new task (use create_task) or marking one done (use "
+            "complete_task)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: 'pending', 'completed', or 'all' to return every task regardless of status. Default is 'pending'."
+                }
+            },
+            "required": []
+        }
+    }
+}
+
+COMPLETE_TASK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "complete_task",
+        "description": (
+            "Marks an existing task as completed. "
+            "WHEN TO USE: the user says they finished, did, or want to check off a specific task (e.g. "
+            "'mark the report task as done', 'I finished calling John'). Accepts either the task's id "
+            "(if you already have it from a prior list_tasks call) or just the task's title/name -- an "
+            "exact id lookup is not required, so there's no need to call list_tasks first just to find "
+            "the id. "
+            "WHEN NOT TO USE: creating a new task or listing existing ones."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The id of the task to mark as completed, or -- if the id isn't known -- the task's title or a distinctive part of it."
+                }
+            },
+            "required": ["task_id"]
+        }
+    }
+}
+
 BASE_TOOLS = [CALCULATOR_TOOL, GET_TIME_TOOL, GET_WEATHER_TOOL, SEARCH_CHAT_HISTORY_TOOL]
 
 # Master registry of every tool schema this app defines, regardless of
@@ -205,7 +297,14 @@ BASE_TOOLS = [CALCULATOR_TOOL, GET_TIME_TOOL, GET_WEATHER_TOOL, SEARCH_CHAT_HIST
 # `<tool_name>...</tool_name>` tag's name against, and that
 # _TOOL_NAME_PATTERN there is derived from — so a new tool added here never
 # silently falls out of sync with either safety net.
-ALL_TOOLS = BASE_TOOLS + [DUCKDUCKGO_SEARCH_TOOL, SEARCH_KNOWLEDGE_BASE_TOOL, LIST_DOCUMENTS_TOOL]
+ALL_TOOLS = BASE_TOOLS + [
+    DUCKDUCKGO_SEARCH_TOOL,
+    SEARCH_KNOWLEDGE_BASE_TOOL,
+    LIST_DOCUMENTS_TOOL,
+    CREATE_TASK_TOOL,
+    LIST_TASKS_TOOL,
+    COMPLETE_TASK_TOOL,
+]
 ALL_TOOL_NAMES = frozenset(t["function"]["name"] for t in ALL_TOOLS)
 
 # Looked up by repair_tool_arguments' regex fallback to know which property
@@ -539,6 +638,64 @@ async def list_documents(supabase: Client, user_id: Optional[str], session_id: s
         "documents": [doc.document_name for doc in documents]
     })
 
+async def create_task(
+    supabase: Client,
+    user_id: Optional[str],
+    title: str,
+    due_at: Optional[str] = None,
+    description: Optional[str] = None,
+) -> str:
+    if not user_id:
+        return json.dumps({"error": "No authenticated user to create a task for."})
+    if not title or not title.strip():
+        return json.dumps({"error": "A task title is required."})
+
+    if due_at is not None and not due_at.strip():
+        due_at = None
+
+    try:
+        task = await create_task_row(supabase, user_id, title.strip(), due_at, description)
+    except Exception as e:
+        logger.error(f"create_task failed for user {user_id}: {e}")
+        return json.dumps({"error": "Failed to create the task."})
+
+    return json.dumps({"result": "Task created.", "task": json.loads(task.model_dump_json())})
+
+
+async def list_tasks(supabase: Client, user_id: Optional[str], status: Optional[str] = "pending") -> str:
+    if not user_id:
+        return json.dumps({"error": "No authenticated user to list tasks for."})
+
+    try:
+        tasks = await list_tasks_row(supabase, user_id, status)
+    except Exception as e:
+        logger.error(f"list_tasks failed for user {user_id}: {e}")
+        return json.dumps({"error": "Failed to list tasks."})
+
+    if not tasks:
+        return json.dumps({"result": "No tasks found."})
+
+    return json.dumps({"tasks": [json.loads(t.model_dump_json()) for t in tasks]})
+
+
+async def complete_task(supabase: Client, user_id: Optional[str], task_id: str) -> str:
+    if not user_id:
+        return json.dumps({"error": "No authenticated user to complete a task for."})
+    if not task_id:
+        return json.dumps({"error": "A task_id is required."})
+
+    try:
+        completed = await complete_task_row(supabase, user_id, task_id)
+    except Exception as e:
+        logger.error(f"complete_task failed for user {user_id}, task {task_id}: {e}")
+        return json.dumps({"error": "Failed to complete the task."})
+
+    if not completed:
+        return json.dumps({"error": "Task not found."})
+
+    return json.dumps({"result": "Task marked as completed."})
+
+
 async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, session_id: str, user_id: Optional[str] = None) -> str:
     if tool_name == "duckduckgo_search":
         return await duckduckgo_search(tool_args.get("search_query", ""))
@@ -554,5 +711,13 @@ async def execute_tool(tool_name: str, tool_args: dict, supabase: Client, sessio
         return await search_knowledge_base(supabase, user_id, session_id, tool_args.get("query", ""))
     elif tool_name == "list_documents":
         return await list_documents(supabase, user_id, session_id)
+    elif tool_name == "create_task":
+        return await create_task(
+            supabase, user_id, tool_args.get("title", ""), tool_args.get("due_at"), tool_args.get("description")
+        )
+    elif tool_name == "list_tasks":
+        return await list_tasks(supabase, user_id, tool_args.get("status", "pending"))
+    elif tool_name == "complete_task":
+        return await complete_task(supabase, user_id, tool_args.get("task_id", ""))
     else:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})

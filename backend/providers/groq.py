@@ -31,10 +31,18 @@ logger = logging.getLogger(__name__)
 # streaming visibly chunkier. Redacting only the exact matched substring,
 # on the same per-chunk cadence as the tag-stripping below, avoids both
 # problems.
-_TOOL_NAME_PATTERN = re.compile(
-    r'\b(?:' + '|'.join(re.escape(n) for n in sorted(ALL_TOOL_NAMES, key=len, reverse=True)) + r')\b',
-    re.IGNORECASE,
-)
+def _build_tool_name_pattern(names) -> "re.Pattern[str]":
+    """Compiles the same kind of exact-name redaction pattern _TOOL_NAME_PATTERN
+    is, but over an arbitrary `names` set -- used to extend redaction/buffering
+    to whatever MCP tool names were merged into this turn's `tools`, in
+    addition to the always-present native registry."""
+    return re.compile(
+        r'\b(?:' + '|'.join(re.escape(n) for n in sorted(names, key=len, reverse=True)) + r')\b',
+        re.IGNORECASE,
+    )
+
+
+_TOOL_NAME_PATTERN = _build_tool_name_pattern(ALL_TOOL_NAMES)
 
 # Any complete `<tag>{...json...}</tag>` pair, where the opening and
 # closing tag names match exactly (via the \1 backreference) and the
@@ -234,6 +242,19 @@ class GroqProvider(BaseProvider):
             if name:
                 executable_tool_names.add(name.lower())
 
+        # ALL_TOOL_NAMES plus whatever MCP tool names were merged into
+        # `tools` this turn (see api.chat.services -- get_merged_tool_schemas),
+        # so the tag-buffering/redaction safety nets below recognize a
+        # hallucinated MCP tool tag exactly the same way they already do a
+        # native one, instead of only ever knowing about the static native
+        # registry. Reuses the precompiled _TOOL_NAME_PATTERN unchanged
+        # whenever no MCP names are present this turn -- a plain native-only
+        # request never pays for a fresh regex compile.
+        known_tool_names = ALL_TOOL_NAMES | executable_tool_names
+        tool_name_pattern = (
+            _TOOL_NAME_PATTERN if known_tool_names == ALL_TOOL_NAMES else _build_tool_name_pattern(known_tool_names)
+        )
+
         try:
             stream = await self.client.chat.completions.create(**kwargs)
         except BadRequestError as bad_req:
@@ -319,7 +340,7 @@ class GroqProvider(BaseProvider):
                     # known-tool-name tag, hold until closed or ended
                     if (re.search(r'<?function=', buffer, re.IGNORECASE)
                             or re.search(r'<?tool_call', buffer, re.IGNORECASE)
-                            or _has_unclosed_tool_tag(buffer, ALL_TOOL_NAMES)):
+                            or _has_unclosed_tool_tag(buffer, known_tool_names)):
                         continue
 
                     # 4. Check if buffer ends with a potential tag prefix
@@ -335,13 +356,13 @@ class GroqProvider(BaseProvider):
                             is_prefix = True
                             break
 
-                    if is_prefix or _ends_with_tool_tag_prefix(buffer, ALL_TOOL_NAMES):
+                    if is_prefix or _ends_with_tool_tag_prefix(buffer, known_tool_names):
                         continue
 
                     # 5. Redact exact internal tool-name mentions, then release
                     # immediately — no sentence-boundary holding, so streaming
                     # stays near-real-time.
-                    buffer = _TOOL_NAME_PATTERN.sub('', buffer)
+                    buffer = tool_name_pattern.sub('', buffer)
 
                     yield buffer
                     buffer = ""
@@ -352,7 +373,7 @@ class GroqProvider(BaseProvider):
                 yield {"type": "text_tool_call", "name": ttc["name"], "arguments": ttc["arguments"]}
             buffer = re.sub(r'<?function=.*$', '', buffer, flags=re.DOTALL | re.IGNORECASE)
             buffer = re.sub(r'<?tool_call.*$', '', buffer, flags=re.DOTALL | re.IGNORECASE)
-            buffer = _TOOL_NAME_PATTERN.sub('', buffer)
+            buffer = tool_name_pattern.sub('', buffer)
             if buffer:
                 yield buffer
 

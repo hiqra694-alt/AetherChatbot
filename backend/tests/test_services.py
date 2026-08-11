@@ -1,3 +1,4 @@
+import contextlib
 import json
 import pytest
 import sys
@@ -6,9 +7,12 @@ from unittest.mock import MagicMock, AsyncMock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from mcp import types
 from api.chat.schemas import Message
 from api.chat.services import ChatService, SYSTEM_PROMPT
+from api.chat.tools import ALL_TOOL_NAMES
 from api.memory.schemas import UserMemoryProfile
+from mcp_integration.mcp_manager import MCPClientManager, MCPServerConnection, mcp_manager
 from providers.mock import MockProvider
 
 
@@ -133,7 +137,8 @@ async def test_system_prompt_insertion_empty_history():
 
     assert len(history) > 0
     assert history[0].role == "system"
-    assert history[0].content == SYSTEM_PROMPT.content
+    assert history[0].content.startswith(SYSTEM_PROMPT.content)
+    assert "<current_time>" in history[0].content
     assert "I don't know based on the provided documents" in history[0].content
 
 @pytest.mark.asyncio
@@ -157,7 +162,8 @@ async def test_system_prompt_insertion_existing_history():
         chunks.append(chunk)
 
     assert history[0].role == "system"
-    assert history[0].content == SYSTEM_PROMPT.content
+    assert history[0].content.startswith(SYSTEM_PROMPT.content)
+    assert "<current_time>" in history[0].content
     assert history[1].role == "user"
 
 @pytest.mark.asyncio
@@ -258,6 +264,471 @@ async def test_stream_chat_with_file_passes_no_tools():
         pass
 
     assert provider.calls_tools == [[]]
+
+
+def _fake_mcp_connection(connector_id, tool_name):
+    connection = MCPServerConnection(connector_id, f"http://fake/{connector_id}/sse")
+    connection.tools = [types.Tool(
+        name=tool_name,
+        description=f"Fake tool for connector {connector_id}.",
+        inputSchema={"type": "object", "properties": {}},
+    )]
+    connection.session = AsyncMock()
+    return connection
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_enabled_connectors_filters_mcp_tools_offered_to_provider(monkeypatch):
+    """
+    Phase 3: when the request carries enabled_connectors, only the enabled
+    connector's MCP tools should end up in the `tools` payload handed to the
+    provider (and therefore to Groq) -- other connected connectors' tools
+    must be excluded, while every native tool stays available regardless.
+    """
+    fake_manager = MCPClientManager(servers=[])
+    fake_manager._connections["some_tool"] = _fake_mcp_connection("some_tool", "some_tool_action")
+    fake_manager._connections["other_connector"] = _fake_mcp_connection("other_connector", "other_connector_action")
+    monkeypatch.setattr("api.chat.services.mcp_manager", fake_manager)
+
+    history = [Message(role="user", content="do something")]
+    provider = ToolCallingFakeProvider(final_text="Done.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+        enabled_connectors=["some_tool"],
+    ):
+        pass
+
+    offered_names = {t["function"]["name"] for t in provider.calls_tools[0]}
+    assert set(ALL_TOOL_NAMES).issubset(offered_names)
+    assert "some_tool_action" in offered_names
+    assert "other_connector_action" not in offered_names
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_no_enabled_connectors_offers_every_connected_connector(monkeypatch):
+    """
+    Backward compatibility: omitting enabled_connectors entirely (None,
+    the default when the frontend sends nothing) must still offer every
+    connected connector's tools, same as before this option existed.
+    """
+    fake_manager = MCPClientManager(servers=[])
+    fake_manager._connections["some_tool"] = _fake_mcp_connection("some_tool", "some_tool_action")
+    fake_manager._connections["other_connector"] = _fake_mcp_connection("other_connector", "other_connector_action")
+    monkeypatch.setattr("api.chat.services.mcp_manager", fake_manager)
+
+    history = [Message(role="user", content="do something")]
+    provider = ToolCallingFakeProvider(final_text="Done.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+    ):
+        pass
+
+    offered_names = {t["function"]["name"] for t in provider.calls_tools[0]}
+    assert "some_tool_action" in offered_names
+    assert "other_connector_action" in offered_names
+
+
+def _fake_workspace_session_factory(connection_when_token, calls):
+    """Stands in for MCPClientManager.create_workspace_session without any
+    real network I/O: records the token it was opened/closed with (so a
+    test can assert the session's lifetime matches the request's), and
+    yields `connection_when_token` only when a truthy token is passed --
+    mirroring the real method's "no token -> no session" contract."""
+    @contextlib.asynccontextmanager
+    async def _factory(token):
+        calls.append(token)
+        try:
+            yield connection_when_token if token else None
+        finally:
+            calls.append(f"closed:{token}")
+    return _factory
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_google_access_token_merges_and_routes_workspace_tool(monkeypatch):
+    """
+    Phase 4: a request carrying google_access_token must open a per-request
+    Workspace session, offer its tools to the provider, and -- when the
+    model calls one -- route execution through that session specifically,
+    never through the shared singleton mcp_manager.call_tool.
+    """
+    fake_workspace_connection = MagicMock()
+    fake_workspace_connection.tools = [types.Tool(
+        name="gmail_search",
+        description="Searches Gmail.",
+        inputSchema={"type": "object", "properties": {"query": {"type": "string"}}},
+    )]
+    fake_workspace_connection.call_tool = AsyncMock(return_value=json.dumps({"result": "3 emails found"}))
+
+    session_calls = []
+    monkeypatch.setattr(
+        mcp_manager, "create_workspace_session", _fake_workspace_session_factory(fake_workspace_connection, session_calls)
+    )
+    fake_static_call_tool = AsyncMock()
+    monkeypatch.setattr(mcp_manager, "call_tool", fake_static_call_tool)
+
+    history = [Message(role="user", content="search my email for invoices")]
+    tool_call_script = [{
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "gmail_search", "arguments": json.dumps({"query": "invoices"})}
+    }]
+    provider = ToolCallingFakeProvider(tool_call_script=tool_call_script, final_text="Found 3 emails.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+        google_access_token="user-oauth-token",
+    ):
+        pass
+
+    offered_names = {t["function"]["name"] for t in provider.calls_tools[0]}
+    assert "gmail_search" in offered_names
+
+    fake_workspace_connection.call_tool.assert_awaited_once_with("gmail_search", {"query": "invoices"})
+    fake_static_call_tool.assert_not_called()
+
+    tool_messages = [m for m in history if m.role == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].name == "gmail_search"
+
+    # Opened with this request's own token and closed again once the
+    # stream finished -- never left dangling.
+    assert session_calls == ["user-oauth-token", "closed:user-oauth-token"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_file_attached_never_opens_workspace_session_even_with_token(monkeypatch):
+    """
+    BRANCH A (a file attached) never offers any tool, so a Workspace
+    session must not even be opened -- effective_google_token must be
+    forced to None regardless of the real token the request carried, to
+    avoid a pointless SSE round trip on a turn that can't use it anyway.
+    """
+    session_calls = []
+    monkeypatch.setattr(
+        mcp_manager, "create_workspace_session", _fake_workspace_session_factory(MagicMock(), session_calls)
+    )
+
+    history = [Message(role="user", content="summarize the pdf")]
+    provider = ToolCallingFakeProvider(final_text="Here is a summary.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+        scoped_document_name="IQRA HAMEED_CV.pdf",
+        google_access_token="user-oauth-token",
+    ):
+        pass
+
+    assert session_calls == [None, "closed:None"]
+    assert provider.calls_tools == [[]]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_no_google_access_token_still_opens_and_closes_with_none(monkeypatch):
+    """
+    Backward compatibility / wiring check: omitting google_access_token
+    entirely (the default for every request that isn't using this
+    connector) must still call create_workspace_session(None) and close it
+    -- proving the async-with wrapping added in Phase 4 doesn't change
+    behavior for the common no-token case, independent of the fact that
+    every pre-Phase-4 test in this file already passes without it.
+    """
+    session_calls = []
+    monkeypatch.setattr(
+        mcp_manager, "create_workspace_session", _fake_workspace_session_factory(MagicMock(), session_calls)
+    )
+
+    history = [Message(role="user", content="hello")]
+    provider = MockProvider()
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+    ):
+        pass
+
+    assert session_calls == [None, "closed:None"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_github_access_token_merges_and_routes_github_tool(monkeypatch):
+    """
+    Phase 6: a request carrying github_access_token must open a per-user
+    GitHub MCP session (independent of any shared-PAT static GitHub
+    connector), offer its tools to the provider, and -- when the model
+    calls one -- route execution through that per-request session, never
+    through the shared singleton mcp_manager.call_tool. Mirrors the
+    google_access_token test above test-for-test.
+    """
+    fake_github_connection = MagicMock()
+    fake_github_connection.tools = [types.Tool(
+        name="create_issue",
+        description="Creates a GitHub issue.",
+        inputSchema={"type": "object", "properties": {"title": {"type": "string"}}},
+    )]
+    fake_github_connection.call_tool = AsyncMock(return_value=json.dumps({"result": "issue #42 created"}))
+
+    session_calls = []
+    monkeypatch.setattr(
+        mcp_manager, "create_github_session", _fake_workspace_session_factory(fake_github_connection, session_calls)
+    )
+    fake_static_call_tool = AsyncMock()
+    monkeypatch.setattr(mcp_manager, "call_tool", fake_static_call_tool)
+
+    history = [Message(role="user", content="open an issue titled bug report")]
+    tool_call_script = [{
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "create_issue", "arguments": json.dumps({"title": "bug report"})}
+    }]
+    provider = ToolCallingFakeProvider(tool_call_script=tool_call_script, final_text="Created issue #42.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+        github_access_token="user-github-token",
+    ):
+        pass
+
+    offered_names = {t["function"]["name"] for t in provider.calls_tools[0]}
+    assert "create_issue" in offered_names
+
+    fake_github_connection.call_tool.assert_awaited_once_with("create_issue", {"title": "bug report"})
+    fake_static_call_tool.assert_not_called()
+
+    tool_messages = [m for m in history if m.role == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].name == "create_issue"
+
+    assert session_calls == ["user-github-token", "closed:user-github-token"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_file_attached_never_opens_github_session_even_with_token(monkeypatch):
+    """BRANCH A regression coverage for GitHub, mirroring the equivalent
+    Google Workspace test."""
+    session_calls = []
+    monkeypatch.setattr(
+        mcp_manager, "create_github_session", _fake_workspace_session_factory(MagicMock(), session_calls)
+    )
+
+    history = [Message(role="user", content="summarize the pdf")]
+    provider = ToolCallingFakeProvider(final_text="Here is a summary.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+        scoped_document_name="IQRA HAMEED_CV.pdf",
+        github_access_token="user-github-token",
+    ):
+        pass
+
+    assert session_calls == [None, "closed:None"]
+    assert provider.calls_tools == [[]]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_no_github_access_token_still_opens_and_closes_with_none(monkeypatch):
+    """Backward compatibility / wiring check for GitHub, mirroring the
+    equivalent Google Workspace test."""
+    session_calls = []
+    monkeypatch.setattr(
+        mcp_manager, "create_github_session", _fake_workspace_session_factory(MagicMock(), session_calls)
+    )
+
+    history = [Message(role="user", content="hello")]
+    provider = MockProvider()
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+    ):
+        pass
+
+    assert session_calls == [None, "closed:None"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_google_and_github_tokens_both_merge_independently(monkeypatch):
+    """Both per-request connectors can be active on the same turn at once:
+    a Workspace tool and a GitHub tool are both offered, and each tool call
+    routes through its own session, never crossing over."""
+    fake_workspace_connection = MagicMock()
+    fake_workspace_connection.tools = [types.Tool(
+        name="gmail_search", description="d", inputSchema={"type": "object", "properties": {}}
+    )]
+    fake_workspace_connection.call_tool = AsyncMock(return_value=json.dumps({"result": "3 emails"}))
+
+    fake_github_connection = MagicMock()
+    fake_github_connection.tools = [types.Tool(
+        name="create_issue", description="d", inputSchema={"type": "object", "properties": {}}
+    )]
+    fake_github_connection.call_tool = AsyncMock(return_value=json.dumps({"result": "issue created"}))
+
+    monkeypatch.setattr(
+        mcp_manager, "create_workspace_session", _fake_workspace_session_factory(fake_workspace_connection, [])
+    )
+    monkeypatch.setattr(
+        mcp_manager, "create_github_session", _fake_workspace_session_factory(fake_github_connection, [])
+    )
+
+    history = [Message(role="user", content="search my email and open an issue")]
+    tool_call_script = [{
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "gmail_search", "arguments": "{}"}
+    }]
+    provider = ToolCallingFakeProvider(tool_call_script=tool_call_script, final_text="Done.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+        google_access_token="user-oauth-token",
+        github_access_token="user-github-token",
+    ):
+        pass
+
+    offered_names = {t["function"]["name"] for t in provider.calls_tools[0]}
+    assert {"gmail_search", "create_issue"}.issubset(offered_names)
+    fake_workspace_connection.call_tool.assert_awaited_once_with("gmail_search", {})
+    fake_github_connection.call_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_google_gmail_only_narrows_workspace_tools(monkeypatch):
+    """
+    Phase 7: enabling only the granular "google_gmail" sub-connector must
+    narrow the Workspace session's offered tools down to Gmail's alone --
+    docs_read (a different sub-connector's tool, from the same session) must
+    never reach the provider even though the session itself discovered it.
+    """
+    fake_workspace_connection = MagicMock()
+    fake_workspace_connection.tools = [
+        types.Tool(name="gmail_search", description="d", inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name="docs_read", description="d", inputSchema={"type": "object", "properties": {}}),
+    ]
+    fake_workspace_connection.call_tool = AsyncMock(return_value=json.dumps({"result": "3 emails"}))
+
+    monkeypatch.setattr(
+        mcp_manager, "create_workspace_session", _fake_workspace_session_factory(fake_workspace_connection, [])
+    )
+
+    history = [Message(role="user", content="search my email for invoices")]
+    tool_call_script = [{
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "gmail_search", "arguments": "{}"}
+    }]
+    provider = ToolCallingFakeProvider(tool_call_script=tool_call_script, final_text="Found them.")
+    mock_supabase = MagicMock()
+
+    async def request_is_disconnected():
+        return False
+
+    async for _ in ChatService.stream_chat(
+        provider_instance=provider,
+        history=history,
+        supabase=mock_supabase,
+        session_id="test_sess",
+        provider_name="mock",
+        request_is_disconnected=request_is_disconnected,
+        user_id="user-123",
+        google_access_token="user-oauth-token",
+        enabled_connectors=["google_gmail"],
+    ):
+        pass
+
+    offered_names = {t["function"]["name"] for t in provider.calls_tools[0]}
+    assert "gmail_search" in offered_names
+    assert "docs_read" not in offered_names
+
 
 @pytest.mark.asyncio
 async def test_stream_chat_agentic_tool_call_triggers_knowledge_base_search(monkeypatch):
@@ -745,7 +1216,13 @@ async def test_build_system_prompt_injects_user_memory(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_system_prompt_returns_singleton_when_no_memory_or_document(monkeypatch):
+async def test_build_system_prompt_injects_temporal_block_when_no_memory_or_document(monkeypatch):
+    """
+    Even with no user memory and no document context, every request must
+    still get a fresh system prompt carrying the live current-time block --
+    unlike the optional memory/document blocks, this one is never skipped,
+    so the shared SYSTEM_PROMPT singleton is never returned as-is.
+    """
     async def fake_get_user_memory(supabase, user_id):
         return None
 
@@ -754,11 +1231,17 @@ async def test_build_system_prompt_returns_singleton_when_no_memory_or_document(
     mock_supabase = MagicMock()
     system_message = await ChatService._build_system_prompt(mock_supabase, "user-123", "test_sess", "hello")
 
-    assert system_message is SYSTEM_PROMPT
+    assert system_message is not SYSTEM_PROMPT
+    assert system_message.content.startswith(SYSTEM_PROMPT.content)
+    assert "<current_time>" in system_message.content
+    assert "<user_memory>" not in system_message.content
+    assert "<knowledge_base_context>" not in system_message.content
+    # The shared singleton must never be mutated by this injection.
+    assert "<current_time>" not in SYSTEM_PROMPT.content
 
 
 @pytest.mark.asyncio
-async def test_build_system_prompt_memory_failure_falls_back_to_singleton(monkeypatch):
+async def test_build_system_prompt_still_injects_temporal_block_on_memory_failure(monkeypatch):
     async def raise_error(supabase, user_id):
         raise RuntimeError("db unavailable")
 
@@ -767,7 +1250,9 @@ async def test_build_system_prompt_memory_failure_falls_back_to_singleton(monkey
     mock_supabase = MagicMock()
     system_message = await ChatService._build_system_prompt(mock_supabase, "user-123", "test_sess", "hello")
 
-    assert system_message is SYSTEM_PROMPT
+    assert system_message is not SYSTEM_PROMPT
+    assert "<current_time>" in system_message.content
+    assert "<user_memory>" not in system_message.content
 
 
 @pytest.mark.asyncio
@@ -792,9 +1277,11 @@ async def test_build_system_prompt_document_retrieval_failure_falls_back_to_empt
         mock_supabase, "user-123", "test_sess", "summarize the pdf", document_name="cv.pdf"
     )
 
-    # No exception propagated, and the failure degrades all the way back to
-    # the untouched singleton since neither block produced any content.
-    assert system_message is SYSTEM_PROMPT
+    # No exception propagated, and the document-context failure degrades to
+    # no knowledge_base_context block -- the temporal block still comes
+    # through, since it's unrelated to (and unaffected by) that retrieval.
+    assert "<current_time>" in system_message.content
+    assert "<knowledge_base_context>" not in system_message.content
 
 
 @pytest.mark.asyncio

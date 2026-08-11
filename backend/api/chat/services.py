@@ -3,16 +3,18 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Callable, Awaitable, List, Optional
 from fastapi import HTTPException
 from supabase import Client
 from api.chat.schemas import Message, ProviderEnum
 from providers.factory import ProviderFactory
 from providers.base import BaseProvider
-from api.chat.tools import ALL_TOOLS, execute_tool, repair_tool_arguments
+from api.chat.tools import ALL_TOOLS, ALL_TOOL_NAMES, execute_tool, repair_tool_arguments
 from api.documents.schemas import RetrievedChunk
 from api.documents.services import format_retrieved_chunks, get_relevant_context
 from api.memory.services import format_memory_for_prompt, get_user_memory
+from mcp_integration.mcp_manager import mcp_manager, get_merged_tool_schemas, mcp_tool_to_native_schema, filter_workspace_tools
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +89,13 @@ SYSTEM_PROMPT = Message(
         "- get_weather: always use this when the user asks for current weather/temperature/conditions in a "
         "city — never guess or answer from general climate knowledge instead.\n"
         "- search_chat_history: use only when the user explicitly asks what was said, discussed, or worked "
-        "on in past conversation sessions.\n\n"
+        "on in past conversation sessions.\n"
+        "- create_task: use when the user asks you to remind them of something or add/track a task or "
+        "to-do item. Never use it for questions about existing tasks.\n"
+        "- list_tasks: use when the user asks what tasks/reminders they have, pending or completed.\n"
+        "- complete_task: use when the user says they finished or want to check off a specific task. Pass "
+        "the task's id if you already have it from an earlier list_tasks call; otherwise just pass the "
+        "task's title/name directly -- an exact id lookup isn't required.\n\n"
         "## Tool usage hierarchy\n"
         "Use your own internal knowledge for general facts, sports trivia, basic counts, and standard CS "
         "concepts — you don't need a tool for those. But when a question genuinely depends on real-time "
@@ -291,6 +299,25 @@ class ChatService:
             return []
 
     @staticmethod
+    def _build_temporal_block() -> str:
+        """
+        Live "what time is it right now" context. Computed fresh on every
+        call -- never cached at import/app-startup -- so relative phrasing
+        in a user's request ("remind me tomorrow at 5pm", "in an hour") has
+        an exact, per-request reference point to resolve against, rather
+        than drifting stale for the lifetime of the server process.
+        """
+        now = datetime.now(timezone.utc)
+        friendly = now.strftime("%A, %B %d, %Y at %I:%M %p UTC")
+        iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return (
+            "\n\n<current_time>\n"
+            f"The current date and time is {friendly} ({iso}). Use this exact reference point to "
+            "compute all relative dates and times for tasks and reminders.\n"
+            "</current_time>"
+        )
+
+    @staticmethod
     async def _build_system_prompt(
         supabase: Client,
         user_id: Optional[str],
@@ -299,14 +326,16 @@ class ChatService:
         document_name: Optional[str] = None,
     ) -> Message:
         """
-        Builds this turn's system prompt as SYSTEM_PROMPT plus two strictly
-        additive, independently-optional blocks:
+        Builds this turn's system prompt as SYSTEM_PROMPT plus:
 
-        1. User memory (see _build_memory_block): the user's continuous
+        1. Current-time context (see _build_temporal_block): always
+           injected, computed fresh per request.
+
+        2. User memory (see _build_memory_block): the user's continuous
            narrative profile, fetched on every turn regardless of whether a
            file is attached.
 
-        2. Document context (see _fetch_document_context), BRANCH A ONLY (a
+        3. Document context (see _fetch_document_context), BRANCH A ONLY (a
            file was attached in this request): injected so generation is
            deterministically grounded in the just-uploaded file. BRANCH B (no
            file attached) does NOT fetch document context here; retrieval in
@@ -315,30 +344,27 @@ class ChatService:
            conversational turn never pays for an unnecessary Voyage/Supabase
            round trip.
 
-        The two blocks are fetched concurrently via asyncio.gather rather
+        Blocks 2 and 3 are fetched concurrently via asyncio.gather rather
         than sequentially -- the user-memory DB read and the document vector
         search don't depend on each other's results, so running them one
         after another only adds latency before the first token can stream.
+        Both swallow their own retrieval failures so grounding stays
+        strictly additive, never a point of failure for chat.
 
         Never mutates the shared SYSTEM_PROMPT singleton, since that object
-        is reused across every concurrent request/user -- if neither block
-        produces anything, the original singleton is returned unchanged;
-        otherwise a fresh Message is built. Both blocks swallow their own
-        retrieval failures so grounding stays strictly additive, never a
-        point of failure for chat.
+        is reused across every concurrent request/user -- a fresh Message is
+        built every call instead (the temporal block alone differs turn to
+        turn, so there is no "nothing changed" case to fast-path anymore).
         """
         memory_block, chunks = await asyncio.gather(
             ChatService._build_memory_block(supabase, user_id),
             ChatService._fetch_document_context(supabase, user_id, session_id, user_message, document_name),
         )
 
-        additions = memory_block
+        additions = ChatService._build_temporal_block() + memory_block
         if chunks:
             context_blocks = format_retrieved_chunks(chunks)
             additions += f"\n\n<knowledge_base_context>\n{context_blocks}\n</knowledge_base_context>"
-
-        if not additions:
-            return SYSTEM_PROMPT
 
         return Message(role="system", content=f"{SYSTEM_PROMPT.content}{additions}")
 
@@ -351,257 +377,369 @@ class ChatService:
         provider_name: str,
         request_is_disconnected: Callable[[], Awaitable[bool]],
         user_id: Optional[str] = None,
-        scoped_document_name: Optional[str] = None
+        scoped_document_name: Optional[str] = None,
+        enabled_connectors: Optional[List[str]] = None,
+        google_access_token: Optional[str] = None,
+        github_access_token: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
         search_results_json = []
         latest_user_message = next((m.content for m in reversed(history) if m.role == "user" and m.content), "")
 
-        if scoped_document_name:
-            # BRANCH A: a file was attached in this request. Retrieval already
-            # happened deterministically in _build_system_prompt below, so no
-            # tool-calling decision is needed this turn — pass no tools at all.
-            active_tools = []
-        else:
-            # BRANCH B: no file attached. Offer search_knowledge_base and
-            # duckduckgo_search so the model can pull from the user's documents
-            # or the live web agentically — routing between them (and deciding
-            # whether either is needed at all) is left entirely to the model's
-            # own tool-calling judgment, guided by SYSTEM_PROMPT. There is no
-            # manual toggle: gating a tool on/off per-request based on a UI
-            # flag, on top of the model's own tool selection, doubled up the
-            # routing decision and made the model second-guess itself more
-            # often ("tool paralysis"), not less.
-            active_tools = list(ACTIVE_TOOLS)
+        # BRANCH A (a file attached) never offers any tool this turn -- see
+        # below -- so a Workspace/GitHub session is only ever worth opening
+        # for BRANCH B, where a tool might actually get called. Passing None
+        # here is exactly what create_workspace_session/create_github_session
+        # treat as "don't connect at all" (mcp_integration.mcp_manager), so
+        # BRANCH A never pays for the extra SSE round trip even if the
+        # request did carry a token.
+        effective_google_token = None if scoped_document_name else google_access_token
+        effective_github_token = None if scoped_document_name else github_access_token
 
-            # Prevent aggressive triggering of chat history for short ambiguous inputs
-            if len(latest_user_message.strip()) < 5:
-                active_tools = [t for t in active_tools if t.get("function", {}).get("name") != "search_chat_history"]
+        # Per-request, per-user Google Workspace (Phase 4) and GitHub
+        # (Phase 6) sessions: opened fresh for this one request, each
+        # authenticated with this user's own OAuth token, and guaranteed
+        # closed by their respective context managers before this `async
+        # with` exits below -- on normal completion, on an exception, or if
+        # the client disconnects and this generator is closed early. Never
+        # touch mcp_manager's singleton `_connections` (see
+        # create_workspace_session's docstring), so neither can ever leak
+        # into another concurrent user's request.
+        async with mcp_manager.create_workspace_session(effective_google_token) as workspace_connection, \
+                mcp_manager.create_github_session(effective_github_token) as github_connection:
+            workspace_tool_names: set = set()
+            github_tool_names: set = set()
 
-        system_message = await ChatService._build_system_prompt(
-            supabase, user_id, session_id, latest_user_message, document_name=scoped_document_name
-        )
-
-        if not history or history[0].role != "system":
-            history.insert(0, system_message)
-        else:
-            history[0] = system_message
-
-        full_text = ""
-        has_called_tool = False
-        try:
-            for _ in range(5):
-                # Once a tool has already run once this request, the remaining
-                # turns are pure synthesis: the model just needs to read the
-                # tool result(s) already in `history` and write the answer, not
-                # decide whether to call yet another tool. Re-offering the full
-                # tool schema set on that turn forces a small model to keep
-                # splitting its attention between "should I call a tool" and
-                # "write the grounded answer" even when the routing decision is
-                # already made — a real contributor to synthesis turns
-                # ignoring retrieved content and fabricating placeholders.
-                turn_tools = [] if has_called_tool else active_tools
-                turn_tool_names = {t.get("function", {}).get("name") for t in turn_tools}
-                tool_calls_received = None
-                turn_text = ""
-                # Length of full_text before this turn streamed anything --
-                # lets a later retraction (see below) trim back exactly this
-                # turn's contribution without disturbing any prior turn's
-                # already-confirmed-final text.
-                full_text_len_before_turn = len(full_text)
-
-                # A transient tool-formatting error is retried once, but only
-                # while nothing has been streamed to the user yet this turn --
-                # retrying after partial output would duplicate visible text.
-                # This is what turns an occasional flaky generation (more
-                # likely on longer follow-up messages / longer histories,
-                # where the model has more context to misformat a call over)
-                # into a silent retry instead of an error on the first try.
-                for attempt in range(2):
-                    try:
-                        stream = provider_instance.stream_response(history, tools=turn_tools)
-                        async for chunk in stream:
-                            if await request_is_disconnected():
-                                logger.info("Client disconnected during stream. Terminating.")
-                                return
-
-                            if isinstance(chunk, dict) and chunk.get("type") == "tool_calls":
-                                tool_calls_received = (tool_calls_received or []) + list(chunk.get("tool_calls") or [])
-                            elif isinstance(chunk, dict) and chunk.get("type") == "text_tool_call":
-                                # Dual-mode fallback: the provider (currently
-                                # only Groq/llama-3.3-70b-versatile) emitted a
-                                # tool call as a literal `<tool_name>{...}</tool_name>`
-                                # text tag instead of a native tool_calls object.
-                                # The provider adapter already keeps that raw tag
-                                # out of the streamed content and only extracts
-                                # names offered to it this turn -- but this is
-                                # re-validated here against turn_tool_names
-                                # (rather than trusted blindly) so any provider
-                                # emitting this event type is held to the same
-                                # "never invoke a tool outside what was
-                                # explicitly offered this turn" rule. A valid
-                                # match is normalized into the same shape a
-                                # native call would have (with a synthetic id,
-                                # since text tags carry none) so the rest of
-                                # this loop -- execution, appending history, and
-                                # the synthesis turn -- proceeds identically to
-                                # the native tool-calling path.
-                                tag_name = chunk.get("name", "")
-                                if tag_name not in turn_tool_names:
-                                    logger.warning(
-                                        f"Discarding text-tag tool call for '{tag_name}': not among the "
-                                        "tools offered this turn."
-                                    )
-                                else:
-                                    logger.warning(
-                                        f"Provider emitted tool call '{tag_name}' as a text tag "
-                                        "instead of a native tool_calls object; using text-tag fallback."
-                                    )
-                                    synthetic_call = {
-                                        "id": f"text_tag_{uuid.uuid4().hex[:8]}",
-                                        "type": "function",
-                                        "function": {
-                                            "name": tag_name,
-                                            "arguments": chunk.get("arguments") or "{}",
-                                        },
-                                    }
-                                    tool_calls_received = (tool_calls_received or []) + [synthetic_call]
-                            elif isinstance(chunk, str):
-                                turn_text += chunk
-                                full_text += chunk
-                                yield f"data: {json.dumps({'content': chunk})}\n\n"
-                        break
-                    except Exception as turn_err:
-                        err_msg = str(turn_err).lower()
-                        if _is_transient_tool_formatting_error(err_msg):
-                            if attempt == 0 and not turn_text:
-                                tool_calls_received = None
-                                if has_called_tool:
-                                    # Includes the "attempted to call tool X
-                                    # which was not in request.tools"
-                                    # validation error -- this is a post-tool
-                                    # synthesis turn, where turn_tools is
-                                    # deliberately empty but the model still
-                                    # tries to call something. Retrying with
-                                    # tool-calling explicitly forced off
-                                    # (rather than just repeating the same
-                                    # request) is what actually resolves it
-                                    # instead of reproducing the same
-                                    # rejection.
-                                    logger.warning(
-                                        f"Tool-call validation error on synthesis turn, retrying once "
-                                        f"with tool-calling forced off: {turn_err}"
-                                    )
-                                    turn_tools = []
-                                    turn_tool_names = set()
-                                else:
-                                    # This is a genuine first attempt at
-                                    # calling a tool (has_called_tool is
-                                    # still False), not a synthesis-turn
-                                    # artifact -- most likely Llama flaking on
-                                    # the call's formatting under load or a
-                                    # long context. Keep turn_tools intact so
-                                    # the retry gives the model a real second
-                                    # chance to call the tool correctly,
-                                    # instead of guaranteeing it can't by
-                                    # stripping tools out from under it.
-                                    logger.warning(
-                                        f"Transient tool-formatting error on first attempt, retrying "
-                                        f"turn once with tools still enabled: {turn_err}"
-                                    )
-                                continue
-                            # Either the retry above also hit a validation
-                            # error, or text had already started streaming
-                            # when the error occurred (so retrying would
-                            # duplicate visible output). Either way this is a
-                            # known, benign tool-calling hiccup, not a real
-                            # failure -- degrade gracefully to whatever text
-                            # has already streamed instead of surfacing an
-                            # internal API validation error to the user.
-                            logger.warning(
-                                f"Tool-call validation error persisted; degrading turn to plain text: {turn_err}"
-                            )
-                            tool_calls_received = None
-                            break
-                        raise
-
-                if tool_calls_received:
-                    if turn_text.strip():
-                        # This turn streamed real content before also (or
-                        # instead) deciding to call a tool -- e.g. llama-
-                        # 3.3-70b-versatile narrating "Let me check the
-                        # weather..." ahead of the native tool_calls delta,
-                        # despite SYSTEM_PROMPT forbidding it. That text has
-                        # already reached the browser live (see the `elif
-                        # isinstance(chunk, str)` yield above), so it can't be
-                        # un-sent -- instead, tell the client to wipe it from
-                        # the message bubble before the synthesis turn's real
-                        # answer starts arriving, and drop it from full_text
-                        # so the persisted message doesn't carry it either.
-                        full_text = full_text[:full_text_len_before_turn]
-                        yield f"data: {json.dumps({'retract': True})}\n\n"
-                    has_called_tool = True
-                    history.append(Message(role="assistant", content=turn_text if turn_text.strip() else None, tool_calls=tool_calls_received))
-
-                    for tc in tool_calls_received:
-                        tool_call_id = tc["id"]
-                        tool_name = tc["function"]["name"]
-                        # Tolerates dirty/truncated JSON in the accumulated
-                        # arguments string (see repair_tool_arguments) instead
-                        # of silently dropping every argument -- including
-                        # required ones like `city` or `search_query` -- the
-                        # moment a strict json.loads first fails.
-                        tool_args = repair_tool_arguments(tool_name, tc["function"]["arguments"])
-
-                        # Execute the tool using the master dispatcher
-                        result_str = await execute_tool(tool_name, tool_args, supabase, session_id, user_id)
-                        
-                        if tool_name == "duckduckgo_search":
-                            try:
-                                parsed = json.loads(result_str)
-                                if isinstance(parsed, list):
-                                    search_results_json.extend(parsed)
-                                    yield f"data: {json.dumps({'sources': parsed})}\n\n"
-                            except Exception:
-                                pass
-                                
-                        history.append(Message(
-                            role="tool", 
-                            content=result_str,
-                            tool_call_id=tool_call_id,
-                            name=tool_name
-                        ))
-                else:
-                    break
-            
-            if not await request_is_disconnected():
-                yield "data: [DONE]\n\n"
-                
-        except Exception as stream_err:
-            logger.error(f"Error during stream generation: {stream_err}")
-            err_msg = str(stream_err).lower()
-            if "tool call validation failed" in err_msg or "attempted to call tool" in err_msg:
-                user_friendly_err = "I am unable to process that tool request right now. Please try rephrasing your message."
-            elif "failed to call a function" in err_msg or "adjust your prompt" in err_msg:
-                user_friendly_err = "I had trouble formatting a tool call for that request. Please try rephrasing your message."
-            elif "rate_limit_exceeded" in err_msg or "429" in err_msg:
-                user_friendly_err = "The AI provider is currently experiencing high traffic. Please try again in a moment."
-            elif _is_transient_tool_formatting_error(err_msg):
-                user_friendly_err = "I'm having trouble processing that request right now. Please try rephrasing."
+            if scoped_document_name:
+                # BRANCH A: a file was attached in this request. Retrieval already
+                # happened deterministically in _build_system_prompt below, so no
+                # tool-calling decision is needed this turn — pass no tools at all.
+                active_tools = []
             else:
-                user_friendly_err = "An unexpected error occurred while communicating with the AI provider. Please try again."
-            yield f"data: {json.dumps({'error': user_friendly_err})}\n\n"
-        finally:
-            if full_text.strip():
-                if search_results_json:
-                    # Embed sources for zero-migration UI rendering on fetch
-                    full_text += f"\n\n<aether-sources>{json.dumps(search_results_json)}</aether-sources>"
-                try:
-                    supabase.table("messages").insert({
-                        "session_id": session_id,
-                        "role": "assistant",
-                        "content": full_text,
-                        "provider_used": provider_name
-                    }).execute()
-                    logger.info(f"Successfully saved assistant response for session {session_id}")
-                except Exception as save_err:
-                    logger.error(f"Failed to save assistant message to DB: {save_err}")
+                # BRANCH B: no file attached. Offer search_knowledge_base and
+                # duckduckgo_search so the model can pull from the user's documents
+                # or the live web agentically — routing between them (and deciding
+                # whether either is needed at all) is left entirely to the model's
+                # own tool-calling judgment, guided by SYSTEM_PROMPT. There is no
+                # manual toggle: gating a tool on/off per-request based on a UI
+                # flag, on top of the model's own tool selection, doubled up the
+                # routing decision and made the model second-guess itself more
+                # often ("tool paralysis"), not less.
+                #
+                # Merged fresh on every turn (rather than once at import time)
+                # with whatever MCP servers are currently connected -- see
+                # mcp_integration.mcp_manager.get_merged_tool_schemas -- so a
+                # server that (re)connects after startup is picked up without
+                # restarting the app. Reduces to native-only automatically when
+                # no MCP server is connected, since the merge is a strict
+                # superset of ACTIVE_TOOLS.
+                #
+                # enabled_connectors (from the request's per-connector toggles,
+                # if any) only ever narrows which MCP connectors' tools are
+                # offered -- native tools stay on regardless. None (nothing
+                # sent by the frontend) offers every connected connector, the
+                # same as before this option existed.
+                active_tools = get_merged_tool_schemas(ACTIVE_TOOLS, mcp_manager, enabled_connectors=enabled_connectors)
+
+                # Prevent aggressive triggering of chat history for short ambiguous inputs
+                if len(latest_user_message.strip()) < 5:
+                    active_tools = [t for t in active_tools if t.get("function", {}).get("name") != "search_chat_history"]
+
+                # Google Workspace (Phase 4) and GitHub (Phase 6) tools,
+                # from the per-request sessions opened above -- entirely
+                # independent of the singleton-registered static connectors
+                # merged just above. A name that's already offered (native,
+                # an enabled static connector, or the other per-request
+                # connector merged first) wins, same "first registration
+                # wins" precedent get_merged_tool_schemas already applies to
+                # native-vs-static collisions. Both loops share one
+                # existing_names set so a Workspace/GitHub name collision
+                # against each other is caught too, not just against native/
+                # static tools.
+                if workspace_connection is not None or github_connection is not None:
+                    existing_names = {t["function"]["name"] for t in active_tools}
+
+                    if workspace_connection is not None:
+                        # Phase 7: narrowed to whichever granular Gmail/Docs/
+                        # Calendar/Drive sub-connector(s) the frontend
+                        # toggled on this turn, rather than every tool the
+                        # Workspace session happens to have discovered -- see
+                        # filter_workspace_tools for the exact contract
+                        # (None/legacy "google_workspace" still offer
+                        # everything, for backward compatibility).
+                        for tool in filter_workspace_tools(workspace_connection.tools, enabled_connectors):
+                            if tool.name in existing_names:
+                                logger.warning(
+                                    f"MCP: Google Workspace tool '{tool.name}' collides with an already-offered "
+                                    "tool name; keeping the existing one."
+                                )
+                                continue
+                            active_tools.append(mcp_tool_to_native_schema(tool))
+                            workspace_tool_names.add(tool.name)
+                            existing_names.add(tool.name)
+
+                    if github_connection is not None:
+                        for tool in github_connection.tools:
+                            if tool.name in existing_names:
+                                logger.warning(
+                                    f"MCP: GitHub tool '{tool.name}' collides with an already-offered "
+                                    "tool name; keeping the existing one."
+                                )
+                                continue
+                            active_tools.append(mcp_tool_to_native_schema(tool))
+                            github_tool_names.add(tool.name)
+                            existing_names.add(tool.name)
+
+            system_message = await ChatService._build_system_prompt(
+                supabase, user_id, session_id, latest_user_message, document_name=scoped_document_name
+            )
+
+            if not history or history[0].role != "system":
+                history.insert(0, system_message)
+            else:
+                history[0] = system_message
+
+            full_text = ""
+            has_called_tool = False
+            try:
+                for _ in range(5):
+                    # Once a tool has already run once this request, the remaining
+                    # turns are pure synthesis: the model just needs to read the
+                    # tool result(s) already in `history` and write the answer, not
+                    # decide whether to call yet another tool. Re-offering the full
+                    # tool schema set on that turn forces a small model to keep
+                    # splitting its attention between "should I call a tool" and
+                    # "write the grounded answer" even when the routing decision is
+                    # already made — a real contributor to synthesis turns
+                    # ignoring retrieved content and fabricating placeholders.
+                    turn_tools = [] if has_called_tool else active_tools
+                    turn_tool_names = {t.get("function", {}).get("name") for t in turn_tools}
+                    tool_calls_received = None
+                    turn_text = ""
+                    # Length of full_text before this turn streamed anything --
+                    # lets a later retraction (see below) trim back exactly this
+                    # turn's contribution without disturbing any prior turn's
+                    # already-confirmed-final text.
+                    full_text_len_before_turn = len(full_text)
+
+                    # A transient tool-formatting error is retried once, but only
+                    # while nothing has been streamed to the user yet this turn --
+                    # retrying after partial output would duplicate visible text.
+                    # This is what turns an occasional flaky generation (more
+                    # likely on longer follow-up messages / longer histories,
+                    # where the model has more context to misformat a call over)
+                    # into a silent retry instead of an error on the first try.
+                    for attempt in range(2):
+                        try:
+                            stream = provider_instance.stream_response(history, tools=turn_tools)
+                            async for chunk in stream:
+                                if await request_is_disconnected():
+                                    logger.info("Client disconnected during stream. Terminating.")
+                                    return
+
+                                if isinstance(chunk, dict) and chunk.get("type") == "tool_calls":
+                                    tool_calls_received = (tool_calls_received or []) + list(chunk.get("tool_calls") or [])
+                                elif isinstance(chunk, dict) and chunk.get("type") == "text_tool_call":
+                                    # Dual-mode fallback: the provider (currently
+                                    # only Groq/llama-3.3-70b-versatile) emitted a
+                                    # tool call as a literal `<tool_name>{...}</tool_name>`
+                                    # text tag instead of a native tool_calls object.
+                                    # The provider adapter already keeps that raw tag
+                                    # out of the streamed content and only extracts
+                                    # names offered to it this turn -- but this is
+                                    # re-validated here against turn_tool_names
+                                    # (rather than trusted blindly) so any provider
+                                    # emitting this event type is held to the same
+                                    # "never invoke a tool outside what was
+                                    # explicitly offered this turn" rule. A valid
+                                    # match is normalized into the same shape a
+                                    # native call would have (with a synthetic id,
+                                    # since text tags carry none) so the rest of
+                                    # this loop -- execution, appending history, and
+                                    # the synthesis turn -- proceeds identically to
+                                    # the native tool-calling path.
+                                    tag_name = chunk.get("name", "")
+                                    if tag_name not in turn_tool_names:
+                                        logger.warning(
+                                            f"Discarding text-tag tool call for '{tag_name}': not among the "
+                                            "tools offered this turn."
+                                        )
+                                    else:
+                                        logger.warning(
+                                            f"Provider emitted tool call '{tag_name}' as a text tag "
+                                            "instead of a native tool_calls object; using text-tag fallback."
+                                        )
+                                        synthetic_call = {
+                                            "id": f"text_tag_{uuid.uuid4().hex[:8]}",
+                                            "type": "function",
+                                            "function": {
+                                                "name": tag_name,
+                                                "arguments": chunk.get("arguments") or "{}",
+                                            },
+                                        }
+                                        tool_calls_received = (tool_calls_received or []) + [synthetic_call]
+                                elif isinstance(chunk, str):
+                                    turn_text += chunk
+                                    full_text += chunk
+                                    yield f"data: {json.dumps({'content': chunk})}\n\n"
+                            break
+                        except Exception as turn_err:
+                            err_msg = str(turn_err).lower()
+                            if _is_transient_tool_formatting_error(err_msg):
+                                if attempt == 0 and not turn_text:
+                                    tool_calls_received = None
+                                    if has_called_tool:
+                                        # Includes the "attempted to call tool X
+                                        # which was not in request.tools"
+                                        # validation error -- this is a post-tool
+                                        # synthesis turn, where turn_tools is
+                                        # deliberately empty but the model still
+                                        # tries to call something. Retrying with
+                                        # tool-calling explicitly forced off
+                                        # (rather than just repeating the same
+                                        # request) is what actually resolves it
+                                        # instead of reproducing the same
+                                        # rejection.
+                                        logger.warning(
+                                            f"Tool-call validation error on synthesis turn, retrying once "
+                                            f"with tool-calling forced off: {turn_err}"
+                                        )
+                                        turn_tools = []
+                                        turn_tool_names = set()
+                                    else:
+                                        # This is a genuine first attempt at
+                                        # calling a tool (has_called_tool is
+                                        # still False), not a synthesis-turn
+                                        # artifact -- most likely Llama flaking on
+                                        # the call's formatting under load or a
+                                        # long context. Keep turn_tools intact so
+                                        # the retry gives the model a real second
+                                        # chance to call the tool correctly,
+                                        # instead of guaranteeing it can't by
+                                        # stripping tools out from under it.
+                                        logger.warning(
+                                            f"Transient tool-formatting error on first attempt, retrying "
+                                            f"turn once with tools still enabled: {turn_err}"
+                                        )
+                                    continue
+                                # Either the retry above also hit a validation
+                                # error, or text had already started streaming
+                                # when the error occurred (so retrying would
+                                # duplicate visible output). Either way this is a
+                                # known, benign tool-calling hiccup, not a real
+                                # failure -- degrade gracefully to whatever text
+                                # has already streamed instead of surfacing an
+                                # internal API validation error to the user.
+                                logger.warning(
+                                    f"Tool-call validation error persisted; degrading turn to plain text: {turn_err}"
+                                )
+                                tool_calls_received = None
+                                break
+                            raise
+
+                    if tool_calls_received:
+                        if turn_text.strip():
+                            # This turn streamed real content before also (or
+                            # instead) deciding to call a tool -- e.g. llama-
+                            # 3.3-70b-versatile narrating "Let me check the
+                            # weather..." ahead of the native tool_calls delta,
+                            # despite SYSTEM_PROMPT forbidding it. That text has
+                            # already reached the browser live (see the `elif
+                            # isinstance(chunk, str)` yield above), so it can't be
+                            # un-sent -- instead, tell the client to wipe it from
+                            # the message bubble before the synthesis turn's real
+                            # answer starts arriving, and drop it from full_text
+                            # so the persisted message doesn't carry it either.
+                            full_text = full_text[:full_text_len_before_turn]
+                            yield f"data: {json.dumps({'retract': True})}\n\n"
+                        has_called_tool = True
+                        history.append(Message(role="assistant", content=turn_text if turn_text.strip() else None, tool_calls=tool_calls_received))
+
+                        for tc in tool_calls_received:
+                            tool_call_id = tc["id"]
+                            tool_name = tc["function"]["name"]
+                            # Tolerates dirty/truncated JSON in the accumulated
+                            # arguments string (see repair_tool_arguments) instead
+                            # of silently dropping every argument -- including
+                            # required ones like `city` or `search_query` -- the
+                            # moment a strict json.loads first fails.
+                            tool_args = repair_tool_arguments(tool_name, tc["function"]["arguments"])
+
+                            # Execution Router: a tool name in ALL_TOOL_NAMES is
+                            # one of this app's own registered tools (see
+                            # api.chat.tools) and always runs through the
+                            # existing native dispatcher, unchanged. A name in
+                            # workspace_tool_names/github_tool_names came from
+                            # this request's own per-user Google Workspace/
+                            # GitHub session and is routed through that same
+                            # temporary, authenticated connection -- never
+                            # through the shared singleton manager, which has
+                            # no knowledge of either session at all. Anything
+                            # else was offered because get_merged_tool_schemas
+                            # added it from a singleton-registered static MCP
+                            # connector (a shared-PAT GitHub, Brave Search,
+                            # ...), so it's routed through mcp_manager instead.
+                            # The model itself never needs to know which kind
+                            # of tool it called.
+                            if tool_name in ALL_TOOL_NAMES:
+                                logger.info(f"Executing Native Tool: {tool_name}")
+                                result_str = await execute_tool(tool_name, tool_args, supabase, session_id, user_id)
+                            elif tool_name in workspace_tool_names:
+                                logger.info(f"Executing Google Workspace Tool: {tool_name}")
+                                result_str = await workspace_connection.call_tool(tool_name, tool_args)
+                            elif tool_name in github_tool_names:
+                                logger.info(f"Executing per-user GitHub Tool: {tool_name}")
+                                result_str = await github_connection.call_tool(tool_name, tool_args)
+                            else:
+                                logger.info(f"Executing MCP Tool: {tool_name}")
+                                result_str = await mcp_manager.call_tool(tool_name, tool_args)
+
+                            if tool_name == "duckduckgo_search":
+                                try:
+                                    parsed = json.loads(result_str)
+                                    if isinstance(parsed, list):
+                                        search_results_json.extend(parsed)
+                                        yield f"data: {json.dumps({'sources': parsed})}\n\n"
+                                except Exception:
+                                    pass
+
+                            history.append(Message(
+                                role="tool",
+                                content=result_str,
+                                tool_call_id=tool_call_id,
+                                name=tool_name
+                            ))
+                    else:
+                        break
+
+                if not await request_is_disconnected():
+                    yield "data: [DONE]\n\n"
+
+            except Exception as stream_err:
+                logger.error(f"Error during stream generation: {stream_err}")
+                err_msg = str(stream_err).lower()
+                if "tool call validation failed" in err_msg or "attempted to call tool" in err_msg:
+                    user_friendly_err = "I am unable to process that tool request right now. Please try rephrasing your message."
+                elif "failed to call a function" in err_msg or "adjust your prompt" in err_msg:
+                    user_friendly_err = "I had trouble formatting a tool call for that request. Please try rephrasing your message."
+                elif "rate_limit_exceeded" in err_msg or "429" in err_msg:
+                    user_friendly_err = "The AI provider is currently experiencing high traffic. Please try again in a moment."
+                elif _is_transient_tool_formatting_error(err_msg):
+                    user_friendly_err = "I'm having trouble processing that request right now. Please try rephrasing."
+                else:
+                    user_friendly_err = "An unexpected error occurred while communicating with the AI provider. Please try again."
+                yield f"data: {json.dumps({'error': user_friendly_err})}\n\n"
+            finally:
+                if full_text.strip():
+                    if search_results_json:
+                        # Embed sources for zero-migration UI rendering on fetch
+                        full_text += f"\n\n<aether-sources>{json.dumps(search_results_json)}</aether-sources>"
+                    try:
+                        supabase.table("messages").insert({
+                            "session_id": session_id,
+                            "role": "assistant",
+                            "content": full_text,
+                            "provider_used": provider_name
+                        }).execute()
+                        logger.info(f"Successfully saved assistant response for session {session_id}")
+                    except Exception as save_err:
+                        logger.error(f"Failed to save assistant message to DB: {save_err}")

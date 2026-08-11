@@ -17,3 +17,4 @@ voyageai
 python-multipart
 rank-bm25
 fastembed
+mcp
