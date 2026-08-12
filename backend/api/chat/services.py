@@ -14,7 +14,14 @@ from api.chat.tools import ALL_TOOLS, ALL_TOOL_NAMES, execute_tool, repair_tool_
 from api.documents.schemas import RetrievedChunk
 from api.documents.services import format_retrieved_chunks, get_relevant_context
 from api.memory.services import format_memory_for_prompt, get_user_memory
-from mcp_integration.mcp_manager import mcp_manager, get_merged_tool_schemas, mcp_tool_to_native_schema, filter_workspace_tools
+from mcp_integration.mcp_manager import (
+    mcp_manager,
+    get_merged_tool_schemas,
+    mcp_tool_to_native_schema,
+    filter_workspace_tools,
+    LEGACY_GOOGLE_WORKSPACE_CONNECTOR_ID,
+)
+from mcp_integration.intent_router import select_relevant_tools
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +103,15 @@ SYSTEM_PROMPT = Message(
         "- complete_task: use when the user says they finished or want to check off a specific task. Pass "
         "the task's id if you already have it from an earlier list_tasks call; otherwise just pass the "
         "task's title/name directly -- an exact id lookup isn't required.\n\n"
+        "## CRITICAL TOOL ROUTING: email vs. tasks\n"
+        "If the user explicitly asks you to draft, send, reply to, or read an email, you MUST use the "
+        "Gmail tools offered to you this turn (e.g. create_draft, search_threads, get_thread) — NEVER "
+        "create_task. Do not use create_task for an email-related request unless the user explicitly asks "
+        "you to 'create a reminder' or 'add a to-do/task' about it — e.g. 'remind me to email Sarah "
+        "tomorrow' is a create_task request, but 'email Sarah about the report' is not, even though both "
+        "mention email. If the request is clearly about email but no Gmail tool is offered to you this "
+        "turn, say you don't currently have email access rather than substituting create_task or any "
+        "other tool.\n\n"
         "## Tool usage hierarchy\n"
         "Use your own internal knowledge for general facts, sports trivia, basic counts, and standard CS "
         "concepts — you don't need a tool for those. But when a question genuinely depends on real-time "
@@ -382,6 +398,24 @@ class ChatService:
         google_access_token: Optional[str] = None,
         github_access_token: Optional[str] = None
     ) -> AsyncGenerator[str, None]:
+        # Debug instrumentation: confirms exactly what the frontend actually
+        # sent this turn for connector gating, before any of the
+        # enabled_connectors/token logic below runs -- never logs the raw
+        # token values themselves, only whether one was present, since these
+        # are live OAuth access tokens. If enabled_connectors here doesn't
+        # match what the connector toggle UI shows as "on", the bug is in
+        # the frontend's FormData construction (src/app/page.tsx's
+        # handleSendMessage) or the /api/chat multipart parsing
+        # (api/chat/routers.py), not in mcp_manager.
+        logger.error(
+            "CHAT REQUEST START: session=%s user=%s enabled_connectors=%r "
+            "google_access_token=%s github_access_token=%s scoped_document_name=%r",
+            session_id, user_id, enabled_connectors,
+            "present" if google_access_token else "absent",
+            "present" if github_access_token else "absent",
+            scoped_document_name,
+        )
+
         search_results_json = []
         latest_user_message = next((m.content for m in reversed(history) if m.role == "user" and m.content), "")
 
@@ -395,6 +429,21 @@ class ChatService:
         effective_google_token = None if scoped_document_name else google_access_token
         effective_github_token = None if scoped_document_name else github_access_token
 
+        # Gates the server-side refresh-token fallback (mcp_manager
+        # .create_workspace_session / _refresh_google_access_token): only
+        # worth a real network round trip to Google's token endpoint when
+        # this turn could actually use the result -- i.e. not BRANCH A (see
+        # effective_google_token above), and only when the user actually
+        # toggled a Google connector on this turn. enabled_connectors=None
+        # (nothing sent -- an old caller, or backward-compat default) offers
+        # every connector, so it's treated as "requested" here too, same as
+        # get_merged_tool_schemas' own None contract.
+        google_workspace_requested = enabled_connectors is None or any(
+            c == LEGACY_GOOGLE_WORKSPACE_CONNECTOR_ID or c.startswith("google_") for c in enabled_connectors
+        )
+        refresh_supabase = supabase if (not scoped_document_name and google_workspace_requested) else None
+        refresh_user_id = user_id if (not scoped_document_name and google_workspace_requested) else None
+
         # Per-request, per-user Google Workspace (Phase 4) and GitHub
         # (Phase 6) sessions: opened fresh for this one request, each
         # authenticated with this user's own OAuth token, and guaranteed
@@ -404,10 +453,16 @@ class ChatService:
         # touch mcp_manager's singleton `_connections` (see
         # create_workspace_session's docstring), so neither can ever leak
         # into another concurrent user's request.
-        async with mcp_manager.create_workspace_session(effective_google_token) as workspace_connection, \
-                mcp_manager.create_github_session(effective_github_token) as github_connection:
+        async with mcp_manager.create_workspace_session(
+            effective_google_token, supabase=refresh_supabase, user_id=refresh_user_id
+        ) as workspace_connection, \
+                mcp_manager.create_github_session(effective_github_token) as github_connection, \
+                mcp_manager.create_gmail_mcp_session(
+                    supabase=refresh_supabase, user_id=refresh_user_id
+                ) as gmail_mcp_connection:
             workspace_tool_names: set = set()
             github_tool_names: set = set()
+            gmail_mcp_tool_names: set = set()
 
             if scoped_document_name:
                 # BRANCH A: a file was attached in this request. Retrieval already
@@ -444,18 +499,18 @@ class ChatService:
                 if len(latest_user_message.strip()) < 5:
                     active_tools = [t for t in active_tools if t.get("function", {}).get("name") != "search_chat_history"]
 
-                # Google Workspace (Phase 4) and GitHub (Phase 6) tools,
-                # from the per-request sessions opened above -- entirely
-                # independent of the singleton-registered static connectors
-                # merged just above. A name that's already offered (native,
-                # an enabled static connector, or the other per-request
-                # connector merged first) wins, same "first registration
-                # wins" precedent get_merged_tool_schemas already applies to
-                # native-vs-static collisions. Both loops share one
-                # existing_names set so a Workspace/GitHub name collision
-                # against each other is caught too, not just against native/
-                # static tools.
-                if workspace_connection is not None or github_connection is not None:
+                # Google Workspace (Phase 4), GitHub (Phase 6), and Gmail MCP
+                # (Phase 1) tools, from the per-request sessions opened
+                # above -- entirely independent of the singleton-registered
+                # static connectors merged just above. A name that's already
+                # offered (native, an enabled static connector, or another
+                # per-request connector merged first) wins, same "first
+                # registration wins" precedent get_merged_tool_schemas
+                # already applies to native-vs-static collisions. All three
+                # loops share one existing_names set so a collision between
+                # any of them is caught too, not just against native/static
+                # tools.
+                if workspace_connection is not None or github_connection is not None or gmail_mcp_connection is not None:
                     existing_names = {t["function"]["name"] for t in active_tools}
 
                     if workspace_connection is not None:
@@ -487,6 +542,30 @@ class ChatService:
                                 continue
                             active_tools.append(mcp_tool_to_native_schema(tool))
                             github_tool_names.add(tool.name)
+                            existing_names.add(tool.name)
+
+                    if gmail_mcp_connection is not None:
+                        # The managed Gmail MCP server advertises 21 full
+                        # tool schemas (~14k tokens) -- offering all of them
+                        # on every turn blew past Groq's 12,000 TPM limit
+                        # and got the whole request rejected with an HTTP
+                        # 413. Narrowed here to the top few tools actually
+                        # relevant to this turn's message instead of a
+                        # permanent static whitelist, so every tool stays
+                        # reachable across turns depending on what's asked --
+                        # see mcp_integration.intent_router for the scoring.
+                        # A no-op for any Gmail MCP server that ever
+                        # advertises 5 or fewer tools (select_relevant_tools'
+                        # own short-circuit).
+                        for tool in select_relevant_tools(latest_user_message, gmail_mcp_connection.tools):
+                            if tool.name in existing_names:
+                                logger.warning(
+                                    f"MCP: Gmail MCP tool '{tool.name}' collides with an already-offered "
+                                    "tool name; keeping the existing one."
+                                )
+                                continue
+                            active_tools.append(mcp_tool_to_native_schema(tool))
+                            gmail_mcp_tool_names.add(tool.name)
                             existing_names.add(tool.name)
 
             system_message = await ChatService._build_system_prompt(
@@ -664,22 +743,32 @@ class ChatService:
                             # moment a strict json.loads first fails.
                             tool_args = repair_tool_arguments(tool_name, tc["function"]["arguments"])
 
+                            # Explicit record of the LLM's own tool choice, independent
+                            # of which branch below ends up executing it -- lets a
+                            # misrouting bug (e.g. create_task called for an email
+                            # request) be diagnosed straight from logs: was it the model
+                            # picking the wrong tool, or this router dispatching a
+                            # correctly-chosen tool to the wrong connection?
+                            logger.info(f"LLM invoked tool: {tool_name} with arguments: {tool_args}")
+
                             # Execution Router: a tool name in ALL_TOOL_NAMES is
                             # one of this app's own registered tools (see
                             # api.chat.tools) and always runs through the
                             # existing native dispatcher, unchanged. A name in
-                            # workspace_tool_names/github_tool_names came from
-                            # this request's own per-user Google Workspace/
-                            # GitHub session and is routed through that same
+                            # workspace_tool_names/github_tool_names/
+                            # gmail_mcp_tool_names came from this request's own
+                            # per-user Google Workspace/GitHub/Gmail MCP
+                            # session and is routed through that same
                             # temporary, authenticated connection -- never
                             # through the shared singleton manager, which has
-                            # no knowledge of either session at all. Anything
-                            # else was offered because get_merged_tool_schemas
-                            # added it from a singleton-registered static MCP
-                            # connector (a shared-PAT GitHub, Brave Search,
-                            # ...), so it's routed through mcp_manager instead.
-                            # The model itself never needs to know which kind
-                            # of tool it called.
+                            # no knowledge of any of these sessions at all.
+                            # Anything else was offered because
+                            # get_merged_tool_schemas added it from a
+                            # singleton-registered static MCP connector (a
+                            # shared-PAT GitHub, Brave Search, ...), so it's
+                            # routed through mcp_manager instead. The model
+                            # itself never needs to know which kind of tool it
+                            # called.
                             if tool_name in ALL_TOOL_NAMES:
                                 logger.info(f"Executing Native Tool: {tool_name}")
                                 result_str = await execute_tool(tool_name, tool_args, supabase, session_id, user_id)
@@ -689,6 +778,9 @@ class ChatService:
                             elif tool_name in github_tool_names:
                                 logger.info(f"Executing per-user GitHub Tool: {tool_name}")
                                 result_str = await github_connection.call_tool(tool_name, tool_args)
+                            elif tool_name in gmail_mcp_tool_names:
+                                logger.info(f"Executing Gmail MCP Tool: {tool_name}")
+                                result_str = await gmail_mcp_connection.call_tool(tool_name, tool_args)
                             else:
                                 logger.info(f"Executing MCP Tool: {tool_name}")
                                 result_str = await mcp_manager.call_tool(tool_name, tool_args)

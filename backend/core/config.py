@@ -50,6 +50,52 @@ class Settings(BaseSettings):
         "", validation_alias=AliasChoices("google_workspace_mcp_url", "GOOGLE_WORKSPACE_MCP_URL")
     )
 
+    # Server-side refresh-token fallback (mcp_integration.mcp_manager
+    # .create_workspace_session / _refresh_google_access_token): used to
+    # exchange a stored user_oauth_tokens.refresh_token for a fresh Google
+    # access token via Google's own token endpoint when a request doesn't
+    # carry a live one. Must match the OAuth client configured in Supabase's
+    # Google provider settings, since the refresh_token was minted for that
+    # client. Both empty by default -- the fallback is simply skipped (same
+    # as no token at all) until both are set.
+    google_client_id: str = Field(
+        "", validation_alias=AliasChoices("google_client_id", "GOOGLE_CLIENT_ID")
+    )
+    google_client_secret: str = Field(
+        "", validation_alias=AliasChoices("google_client_secret", "GOOGLE_CLIENT_SECRET")
+    )
+
+    # Gmail MCP connector (Phase 1, mcp_integration/gmail_mcp.py +
+    # gmail_mcp_router.py): a fully separate OAuth client from
+    # google_client_id/google_client_secret above -- this one talks
+    # directly to Google's OAuth endpoints (never through Supabase's own
+    # provider-linking flow) and its refresh token is stored under the
+    # distinct 'google_gmail_mcp' user_oauth_tokens row, never the plain
+    # 'google' row. All three must be set for /api/connectors/gmail-mcp/
+    # authorize to work; empty by default -- that route 503s until
+    # configured.
+    gmail_mcp_client_id: str = Field(
+        "", validation_alias=AliasChoices("gmail_mcp_client_id", "GMAIL_MCP_CLIENT_ID")
+    )
+    gmail_mcp_client_secret: str = Field(
+        "", validation_alias=AliasChoices("gmail_mcp_client_secret", "GMAIL_MCP_CLIENT_SECRET")
+    )
+    gmail_mcp_redirect_uri: str = Field(
+        "", validation_alias=AliasChoices("gmail_mcp_redirect_uri", "GMAIL_MCP_REDIRECT_URI")
+    )
+
+    # Local-development-only escape hatch (mcp_integration/gmail_mcp_router.py):
+    # when true, GET /api/connectors/gmail-mcp/authorize additionally accepts
+    # a `dev_user_id` query param as an UNVERIFIED substitute for a real
+    # Supabase `access_token`, so the Google consent/redirect/callback flow
+    # can be exercised by pasting a URL straight into a browser instead of
+    # extracting a live JWT first. False by default -- must be explicitly
+    # set to true, and must never be set in any deployed environment, since
+    # it lets the caller claim to be any user_id with zero verification.
+    gmail_mcp_dev_mode: bool = Field(
+        False, validation_alias=AliasChoices("gmail_mcp_dev_mode", "GMAIL_MCP_DEV_MODE")
+    )
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
         env_file_encoding="utf-8",

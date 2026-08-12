@@ -6,11 +6,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.chat.routers import router as chat_router
 from api.chat.tools import ALL_TOOLS
+from api.connectors.routers import router as connectors_router
 from api.documents.routers import router as documents_router
 from api.memory.routers import router as memory_router
 from api.tasks.routers import router as tasks_router
 from core.scheduler import run_scheduler_loop
 from mcp_integration.mcp_manager import mcp_manager, get_merged_tool_schemas
+from mcp_integration.gmail_mcp_router import router as gmail_mcp_router
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -64,9 +66,14 @@ app.add_middleware(
 
 # Include API Routers
 app.include_router(chat_router)
+app.include_router(connectors_router)
 app.include_router(documents_router)
 app.include_router(memory_router)
 app.include_router(tasks_router)
+# Gmail MCP connector (Phase 1) -- fully isolated OAuth routes, see
+# mcp_integration/gmail_mcp_router.py. Never touches connectors_router or
+# the Supabase identity-linking flow it backs.
+app.include_router(gmail_mcp_router)
 
 if __name__ == "__main__":
     import uvicorn

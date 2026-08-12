@@ -39,11 +39,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable, Optional
 
+import httpx
 from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client
+from supabase import Client
 
 from core.config import get_settings
+from mcp_integration.gmail_mcp import GMAIL_MCP_SERVER_URL, refresh_gmail_mcp_access_token
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +62,118 @@ logger = logging.getLogger(__name__)
 # DNS failure already fails fast on its own; this constant exists for the
 # slower, hung-not-failed case those don't cover.
 CONNECT_TIMEOUT_SECONDS = 10.0
+
+# Google's OAuth token endpoint, used only by _refresh_google_access_token
+# below to exchange a stored refresh_token for a fresh access token.
+GOOGLE_TOKEN_REFRESH_URL = "https://oauth2.googleapis.com/token"
+
+
+async def _refresh_google_access_token(supabase: Client, user_id: str) -> Optional[str]:
+    """
+    Server-side fallback for when a chat request doesn't carry a live Google
+    OAuth access token (see ChatService.stream_chat) -- e.g. the token the
+    frontend cached in memory right after linkIdentity has aged out of the
+    browser session on reload, a known limitation of Supabase's own
+    provider_token handling (never persisted past the initial OAuth
+    exchange, see src/app/page.tsx). Looks up this user's long-lived
+    refresh_token -- stored via POST /api/connectors/store-token at link
+    time, see api/connectors/routers.py -- and exchanges it for a fresh,
+    short-lived access token directly against Google's own token endpoint,
+    using this deployment's GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET.
+
+    Returns None -- logged, never raised -- on every failure mode: no
+    client id/secret configured, no stored refresh token for this user, a
+    DB error, or Google rejecting/revoking the refresh token (e.g. the user
+    revoked access from their Google Account settings). The caller
+    (create_workspace_session) treats a None return exactly like "no token
+    was ever sent" and simply proceeds without a Workspace session this
+    turn, rather than ever raising out of a chat request.
+    """
+    settings = get_settings()
+    if not settings.google_client_id or not settings.google_client_secret:
+        # Previously a bare `return None` -- this is a config gap, not an
+        # expected "user just hasn't linked anything" case, and was
+        # indistinguishable from every other silent-None branch below. Now
+        # logged at ERROR so a misconfigured deployment shows up in logs
+        # instead of just quietly never offering Workspace tools to anyone.
+        logger.error(
+            "MCP: Google refresh-token fallback skipped for user %s -- "
+            "GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET not configured.",
+            user_id,
+        )
+        return None
+
+    try:
+        res = (
+            supabase.table("user_oauth_tokens")
+            .select("refresh_token")
+            .eq("user_id", user_id)
+            .eq("provider", "google")
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.error(
+            "MCP: failed to look up stored Google refresh token for user %s.", user_id, exc_info=True
+        )
+        return None
+
+    rows = res.data or []
+    refresh_token = rows[0].get("refresh_token") if rows else None
+    if not refresh_token:
+        logger.error(
+            "MCP: no stored Google refresh_token found for user %s -- "
+            "user_oauth_tokens has no row for (user_id=%s, provider=google). "
+            "POST /api/connectors/store-token returning 200 only proves the "
+            "row was written for *some* user/provider at *some* point -- it "
+            "does not prove this row, for this user, still exists now.",
+            user_id, user_id,
+        )
+        return None
+
+    try:
+        async with httpx.AsyncClient() as http_client:
+            response = await http_client.post(
+                GOOGLE_TOKEN_REFRESH_URL,
+                data={
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+                timeout=CONNECT_TIMEOUT_SECONDS,
+            )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as http_err:
+        # The exact reason Google rejected this refresh_token -- most
+        # commonly a 400 invalid_grant (token expired/revoked, e.g. the user
+        # revoked access from their Google Account settings, or this
+        # client_id/secret doesn't match the one the token was minted
+        # under). Logged explicitly (status + body) instead of via a
+        # generic `except Exception`, which discarded both entirely.
+        logger.error(
+            "MCP: Google rejected the refresh_token for user %s -- status=%s body=%s",
+            user_id, http_err.response.status_code, http_err.response.text,
+        )
+        return None
+    except Exception:
+        # Network-level failure (DNS, timeout, connection refused) -- there
+        # is no HTTP response to inspect at all here, unlike the
+        # HTTPStatusError branch above.
+        logger.error(
+            "MCP: network error calling Google's token endpoint for user %s.", user_id, exc_info=True
+        )
+        return None
+
+    access_token = response.json().get("access_token")
+    if not access_token:
+        logger.error(
+            "MCP: Google's token endpoint returned 200 with no access_token for user %s -- body=%s",
+            user_id, response.text,
+        )
+        return None
+
+    return access_token
 
 
 @dataclass
@@ -115,18 +231,38 @@ class MCPServerConnection:
     uses anyio task groups that aren't safe to enter in one task and exit
     in another."""
 
-    def __init__(self, connector_id: str, url: str, headers: Optional[dict[str, str]] = None):
+    def __init__(
+        self,
+        connector_id: str,
+        url: str,
+        headers: Optional[dict[str, str]] = None,
+        transport: str = "sse",
+    ):
         self.connector_id = connector_id
         self.url = url
         self.headers = headers
+        # "sse" (default, every pre-existing connector) or "streamable_http"
+        # -- only the Gmail MCP connector (create_gmail_mcp_session) uses
+        # the latter, since that's the transport Google's managed Gmail MCP
+        # server speaks. Purely additive: omitting this param preserves the
+        # exact prior sse_client-only behavior for every other caller.
+        self.transport = transport
         self.session: Optional[ClientSession] = None
         self.tools: list[types.Tool] = []
         self._exit_stack = contextlib.AsyncExitStack()
 
     async def connect(self) -> None:
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
-            sse_client(self.url, headers=self.headers)
-        )
+        if self.transport == "streamable_http":
+            http_client = await self._exit_stack.enter_async_context(
+                httpx.AsyncClient(headers=self.headers, timeout=CONNECT_TIMEOUT_SECONDS)
+            )
+            read_stream, write_stream = await self._exit_stack.enter_async_context(
+                streamable_http_client(self.url, http_client=http_client)
+            )
+        else:
+            read_stream, write_stream = await self._exit_stack.enter_async_context(
+                sse_client(self.url, headers=self.headers)
+            )
         self.session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
         await self.session.initialize()
         result = await self.session.list_tools()
@@ -236,7 +372,12 @@ class MCPClientManager:
         return await connection.call_tool(tool_name, arguments)
 
     @contextlib.asynccontextmanager
-    async def create_workspace_session(self, token: Optional[str]) -> AsyncIterator[Optional[MCPServerConnection]]:
+    async def create_workspace_session(
+        self,
+        token: Optional[str],
+        supabase: Optional[Client] = None,
+        user_id: Optional[str] = None,
+    ) -> AsyncIterator[Optional[MCPServerConnection]]:
         """
         Opens a short-lived MCP session to the Google Workspace connector,
         authenticated with `token` -- this specific user's own OAuth access
@@ -256,12 +397,24 @@ class MCPClientManager:
         executing with) a different user's Google token. Each call to this
         method gets its own private connection instead.
 
+        `supabase`/`user_id`, when both given, back a server-side fallback:
+        if `token` itself is falsy, this looks up and refreshes this user's
+        stored Google refresh_token (see _refresh_google_access_token)
+        before falling back to "no session" -- letting a previously-linked
+        user's Workspace tools keep working across reloads even once their
+        browser-cached access token has aged out of the session, without
+        ever re-prompting for OAuth consent. Omit both (the default) to
+        keep the exact prior behavior: no token in, no session, full stop --
+        see ChatService.stream_chat for when the caller chooses to pass
+        them (only when this turn could actually use the result).
+
         Yields None -- and opens no connection at all -- when `token` is
-        falsy or no `GOOGLE_WORKSPACE_MCP_URL` is configured. That's the
-        default for every request that isn't using this connector, and for
-        BRANCH A (a file attached, no tools offered this turn) regardless
-        of whether a token was sent -- see ChatService.stream_chat, which
-        passes None for `token` in that case specifically to skip the SSE
+        still falsy after that fallback, or no `GOOGLE_WORKSPACE_MCP_URL` is
+        configured. That's the default for every request that isn't using
+        this connector, and for BRANCH A (a file attached, no tools offered
+        this turn) regardless of whether a token was sent -- see
+        ChatService.stream_chat, which passes None for `token` (and omits
+        `supabase`/`user_id`) in that case specifically to skip the SSE
         round trip entirely.
 
         A connection failure (bad token, unreachable server) is logged and
@@ -271,7 +424,36 @@ class MCPClientManager:
         crash the chat stream.
         """
         settings = get_settings()
-        if not token or not settings.google_workspace_mcp_url:
+
+        had_live_token = bool(token)
+        if not token and supabase is not None and user_id:
+            token = await _refresh_google_access_token(supabase, user_id)
+
+        if not token:
+            # Previously a bare `yield None` -- gives no signal at all
+            # whether this was "no token sent and no refresh fallback
+            # attempted" (supabase/user_id omitted -- see ChatService
+            # .stream_chat's BRANCH A / google_workspace_requested gating)
+            # vs. "refresh fallback WAS attempted and failed" (see
+            # _refresh_google_access_token's own ERROR logs just above this
+            # one in the log stream for the real reason in that case).
+            logger.error(
+                "MCP: no Google Workspace session opened for user %s -- no live access token was sent"
+                " and %s.",
+                user_id,
+                "the refresh-token fallback was attempted (see the error logged just above, if any)"
+                if (not had_live_token and supabase is not None and user_id)
+                else "no refresh-token fallback was attempted (supabase/user_id not passed this turn)",
+            )
+            yield None
+            return
+
+        if not settings.google_workspace_mcp_url:
+            logger.error(
+                "MCP: no Google Workspace session opened for user %s -- a usable access token was "
+                "obtained, but GOOGLE_WORKSPACE_MCP_URL is not configured.",
+                user_id,
+            )
             yield None
             return
 
@@ -283,10 +465,19 @@ class MCPClientManager:
         try:
             await asyncio.wait_for(connection.connect(), timeout=CONNECT_TIMEOUT_SECONDS)
         except Exception:
-            logger.exception("MCP: failed to establish Google Workspace session; continuing without it.")
+            logger.error(
+                "MCP: failed to establish Google Workspace session for user %s at %s -- "
+                "continuing without it.",
+                user_id, settings.google_workspace_mcp_url, exc_info=True,
+            )
             await connection.close()
             yield None
             return
+
+        logger.info(
+            "MCP: Google Workspace session established for user %s -- discovered %d tool(s): %s",
+            user_id, len(connection.tools), [t.name for t in connection.tools],
+        )
 
         try:
             yield connection
@@ -336,6 +527,87 @@ class MCPClientManager:
             await connection.close()
             yield None
             return
+
+        try:
+            yield connection
+        finally:
+            await connection.close()
+
+    @contextlib.asynccontextmanager
+    async def create_gmail_mcp_session(
+        self,
+        supabase: Optional[Client] = None,
+        user_id: Optional[str] = None,
+    ) -> AsyncIterator[Optional[MCPServerConnection]]:
+        """
+        Per-user session for Google's managed Gmail MCP server
+        (mcp_integration.gmail_mcp.GMAIL_MCP_SERVER_URL) -- fully isolated
+        from create_workspace_session/create_github_session above: it
+        authenticates with its own OAuth client (GMAIL_MCP_CLIENT_ID/
+        SECRET) via gmail_mcp.refresh_gmail_mcp_access_token, which reads
+        this user's stored token from the distinct 'google_gmail_mcp'
+        user_oauth_tokens row rather than the plain 'google' row
+        create_workspace_session's own refresh fallback uses -- see
+        mcp_integration/gmail_mcp.py's module docstring for why those two
+        code paths are kept fully separate rather than shared. Also unlike
+        every other connector here, it dials over Streamable HTTP
+        (MCPServerConnection(transport="streamable_http")), not SSE, since
+        that's the transport Google's managed MCP server speaks.
+
+        Same yield contract as create_workspace_session/create_github_session:
+        None -- and no connection opened at all -- when `supabase`/`user_id`
+        aren't both given, GMAIL_MCP_CLIENT_ID/SECRET/REDIRECT_URI aren't
+        fully configured, this user has no stored google_gmail_mcp refresh
+        token (refresh_gmail_mcp_access_token returns None), or the connect
+        itself fails -- every case logged, never raised, so one broken/
+        unlinked Gmail MCP session degrades a turn to "no Gmail tools
+        available" exactly like the other connectors already do. Never
+        registered on self._connections, for the identical per-user
+        tenant-isolation reason documented on create_workspace_session.
+
+        The returned connection's `.tools` are ordinary `mcp.types.Tool`
+        objects, convertible with mcp_tool_to_native_schema exactly like
+        workspace_connection.tools/github_connection.tools already are in
+        ChatService.stream_chat -- merging them into that turn's
+        active_tools is the same one-line pattern used there for
+        github_connection, left for whichever phase wires this connector
+        into the live chat loop.
+        """
+        if supabase is None or not user_id:
+            yield None
+            return
+
+        settings = get_settings()
+        if not (settings.gmail_mcp_client_id and settings.gmail_mcp_client_secret and settings.gmail_mcp_redirect_uri):
+            yield None
+            return
+
+        access_token = await refresh_gmail_mcp_access_token(supabase, user_id)
+        if not access_token:
+            yield None
+            return
+
+        connection = MCPServerConnection(
+            "google_gmail_mcp",
+            GMAIL_MCP_SERVER_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            transport="streamable_http",
+        )
+        try:
+            await asyncio.wait_for(connection.connect(), timeout=CONNECT_TIMEOUT_SECONDS)
+        except Exception:
+            logger.error(
+                "MCP: failed to establish Gmail MCP session for user %s at %s -- continuing without it.",
+                user_id, GMAIL_MCP_SERVER_URL, exc_info=True,
+            )
+            await connection.close()
+            yield None
+            return
+
+        logger.info(
+            "MCP: Gmail MCP session established for user %s -- discovered %d tool(s): %s",
+            user_id, len(connection.tools), [t.name for t in connection.tools],
+        )
 
         try:
             yield connection

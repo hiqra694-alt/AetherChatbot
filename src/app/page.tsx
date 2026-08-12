@@ -41,7 +41,8 @@ import {
   CheckCircle2,
   Calendar,
   HardDrive,
-  MoreVertical
+  MoreVertical,
+  Unlink
 } from 'lucide-react'
 
 interface UserProfile {
@@ -177,6 +178,18 @@ export default function Dashboard() {
   // the OAuth access token Supabase attached right after the exchange has
   // aged out of the session, so the "Connected" badge stays accurate.
   const [linkedProviders, setLinkedProviders] = useState<{ google: boolean; github: boolean }>({ google: false, github: false })
+  // Whether the backend actually has a *usable* stored refresh_token per
+  // provider (GET /api/connectors/status), as opposed to linkedProviders
+  // above merely reflecting that the identity is linked at all. These
+  // diverge for any Google identity linked before the offline-access
+  // refresh-token flow existed (or via a plain sign-in through Google
+  // rather than this app's own connector toggle) -- see toggleConnector,
+  // which uses this to tell the user a disconnect+reconnect is actually
+  // required instead of silently enabling a connector that can never open
+  // a Workspace session (Supabase's linkIdentity() refuses to re-run for
+  // an identity already linked to the current user, so simply retrying the
+  // normal link flow can't self-heal this).
+  const [hasStoredRefreshToken, setHasStoredRefreshToken] = useState<{ google: boolean; github: boolean }>({ google: false, github: false })
 
   // Toast notification (OAuth redirect outcomes, connector state changes)
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
@@ -227,30 +240,36 @@ export default function Dashboard() {
       setTheme(savedTheme)
     }
 
-    // A connector's linkIdentity redirect (see toggleConnector) lands back
-    // here on '/' with either an error (?error=...&error_code=...
-    // &error_description=...) or a success param appended by Supabase --
-    // read synchronously, before any async work below, since these params
-    // must be captured before supabase-js's own URL detection or a later
+    // A connector's linkIdentity redirect (see toggleConnector) round-trips
+    // through /auth/callback/route.ts's server-side PKCE code exchange
+    // before landing back here on '/' -- on success with no query params of
+    // its own (so genuine success can't be told apart from URL params
+    // alone; see the pendingConnectorId handling in initApp below, which
+    // uses the freshly-fetched `linked` identities as the real signal
+    // instead). Only a real failure -- identity_already_exists (not a true
+    // failure, just re-forwarded to be handled below), a different
+    // error_code, or a bare `error` -- ever arrives as a query param here,
+    // forwarded through by route.ts. Read synchronously, before any async
+    // work below, since these params must be captured before a later
     // render strips them. Read first so `pendingLabel` is ready for the
     // toast regardless of how initApp resolves below.
     const params = new URLSearchParams(window.location.search)
     const errorCode = params.get('error_code')
     const errorDescription = params.get('error_description')
-    const hasOAuthRedirectParams = params.has('error') || params.has('error_code') || params.has('access_token')
+    const errorParam = params.get('error')
+    const hasOAuthRedirectParams = params.has('error') || params.has('error_code')
     const pendingConnectorId = localStorage.getItem('aether_pending_connector')
     const pendingConnector = CONNECTORS.find(c => c.id === pendingConnectorId)
     const pendingLabel = pendingConnector?.label || 'Connector'
 
-    if (errorCode === 'identity_already_exists') {
-      // Not a real failure -- this provider identity is already linked to
-      // the account, so treat it as a successful connection rather than
-      // surfacing GoTrue's error to the user.
-      setToast({ type: 'success', message: `Successfully connected ${pendingLabel}!` })
-    } else if (params.get('access_token')) {
-      setToast({ type: 'success', message: `Successfully connected ${pendingLabel}!` })
-    } else if (errorCode || params.get('error')) {
+    // A real (non "already linked") failure is decidable immediately from
+    // the URL alone. identity_already_exists and genuine success both
+    // depend on whether the provider is actually linked afterward, so both
+    // are resolved together once `linked` is fetched in initApp below.
+    if (errorCode && errorCode !== 'identity_already_exists') {
       if (errorDescription) console.error('OAuth connector error:', decodeURIComponent(errorDescription.replace(/\+/g, ' ')))
+      setToast({ type: 'error', message: `Failed to connect ${pendingLabel}. Please try again.` })
+    } else if (!errorCode && errorParam) {
       setToast({ type: 'error', message: `Failed to connect ${pendingLabel}. Please try again.` })
     }
 
@@ -283,19 +302,100 @@ export default function Dashboard() {
         // this can legitimately be empty even for a provider the user has
         // linked in the past.
         const { data: { session } } = await supabase.auth.getSession()
-        const linkedProvider = session?.user?.app_metadata?.provider
         const providerToken = session?.provider_token
-        if (providerToken && (linkedProvider === 'google' || linkedProvider === 'github')) {
-          setProviderTokens(prev => ({ ...prev, [linkedProvider]: providerToken }))
+
+        // Which provider this session's provider_token (if any) actually
+        // belongs to. FIXED BUG: this used to be read straight off
+        // session.user.app_metadata.provider, which names the account's
+        // ORIGINAL signup provider -- not whichever identity a linkIdentity
+        // flow just added. That silently dropped the token for every
+        // secondary linked provider (e.g. an email/password account linking
+        // Google), since app_metadata.provider never changes to 'google' in
+        // that case. Prefer pendingConnector (see toggleConnector -- we know
+        // exactly which provider we were just linking, unambiguously) and
+        // only fall back to identities/app_metadata for a plain OAuth sign-in
+        // that never went through our own connector flow.
+        let tokenProvider: 'google' | 'github' | undefined = pendingConnector?.provider
+        if (!tokenProvider) {
+          const linkedOAuthProviders = (['google', 'github'] as const).filter(p => linked[p])
+          if (linkedOAuthProviders.length === 1) {
+            tokenProvider = linkedOAuthProviders[0]
+          } else {
+            // Multiple (or zero) OAuth identities linked and no pending
+            // connector -- app_metadata.provider is reliable here since it
+            // names whichever provider this session's own sign-in actually
+            // went through.
+            const signInProvider = session?.user?.app_metadata?.provider
+            if (signInProvider === 'google' || signInProvider === 'github') tokenProvider = signInProvider
+          }
+        }
+
+        if (providerToken && tokenProvider) {
+          setProviderTokens(prev => ({ ...prev, [tokenProvider]: providerToken }))
+        }
+
+        // Long-lived refresh token (only present when linkIdentity requested
+        // offline access -- see toggleConnector's queryParams), persisted
+        // server-side so the backend can mint a fresh access token on its
+        // own once this session's own copy ages out (mcp_manager
+        // .create_workspace_session). Best-effort/fire-and-forget: losing
+        // this doesn't block anything the user is doing right now, it just
+        // means the connector won't survive a token refresh down the line.
+        const providerRefreshToken = session?.provider_refresh_token
+        if (providerRefreshToken && tokenProvider && session?.access_token) {
+          fetch('/api/connectors/store-token', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${session.access_token}`
+            },
+            body: JSON.stringify({ provider: tokenProvider, refresh_token: providerRefreshToken })
+          }).catch(err => console.error('Failed to persist OAuth refresh token:', err))
+        }
+
+        // Whether a stored refresh_token already backs each linked provider
+        // (see hasStoredRefreshToken's own comment) -- fetched on every
+        // load, not just right after linkIdentity, since a provider can be
+        // "linked" without one for reasons unrelated to this page load
+        // (linked in a previous session before this endpoint/feature
+        // existed, or via a plain provider sign-in). Best-effort: a failed
+        // lookup just leaves toggleConnector unable to distinguish the two
+        // cases this turn, it doesn't block anything else on the page.
+        if (session?.access_token) {
+          fetch('/api/connectors/status', {
+            headers: { 'Authorization': `Bearer ${session.access_token}` }
+          })
+            .then(res => res.ok ? res.json() : null)
+            .then(status => {
+              if (status) setHasStoredRefreshToken({ google: !!status.google, github: !!status.github })
+            })
+            .catch(err => console.error('Failed to fetch connector status:', err))
         }
 
         // If this load is the return leg of a linkIdentity redirect and that
         // provider is now linked, flip the specific connector the user asked
         // for straight to "on" rather than leaving them to find and
-        // re-toggle it themselves.
+        // re-toggle it themselves. `linked` (fresh from user.identities) is
+        // the authoritative success signal here -- a genuine success lands
+        // back on '/' with no query params at all (see the mount effect's
+        // top block), and identity_already_exists (deferred from that same
+        // block) means the identity was already linked, so `linked` is true
+        // in that case too. Only skip this whole block when a real failure
+        // already got its own toast up there -- avoid double-toasting.
         if (pendingConnectorId) {
           if (pendingConnector && linked[pendingConnector.provider]) {
             setEnabledConnectors(prev => prev.includes(pendingConnectorId) ? prev : [...prev, pendingConnectorId])
+            if (!errorCode || errorCode === 'identity_already_exists') {
+              setToast({ type: 'success', message: `Successfully connected ${pendingLabel}!` })
+            }
+          } else if (!errorCode && !errorParam) {
+            // Landed back with a pending connector, no error was reported,
+            // yet the provider still isn't linked -- an unexpected outcome
+            // (e.g. the user closed the consent screen without an explicit
+            // error redirect), but silently leaving the toggle off with no
+            // feedback at all would be worse than a possibly-redundant
+            // error toast.
+            setToast({ type: 'error', message: `Failed to connect ${pendingLabel}. Please try again.` })
           }
           localStorage.removeItem('aether_pending_connector')
         }
@@ -315,12 +415,25 @@ export default function Dashboard() {
       const response = await fetch('/api/tasks?due_only=true', {
         headers: { 'Authorization': `Bearer ${token}` }
       })
-      if (!response.ok) throw new Error('Failed to fetch reminders.')
+
+      if (!response.ok) {
+        // Runs on a background 60s poll (see the effect below), fully
+        // decoupled from chat streaming state (isLoading/isStreaming) --
+        // a failed poll (expired session, backend hiccup) must never throw,
+        // it should just leave the reminder bell empty until the next tick.
+        console.warn('fetchDueReminders: request failed with status', response.status)
+        setDueReminders([])
+        return
+      }
 
       const data = await response.json()
       setDueReminders(data.tasks || [])
     } catch (err) {
+      // Network failure, a getSession() rejection, or a malformed JSON body
+      // -- same "never interrupt the rest of the app" contract as the
+      // !response.ok branch above.
       console.error('Error fetching due reminders:', err)
+      setDueReminders([])
     } finally {
       setLoadingReminders(false)
     }
@@ -695,7 +808,38 @@ export default function Dashboard() {
         localStorage.setItem('aether_pending_connector', connectorId)
         const { error } = await supabase.auth.linkIdentity({
           provider,
-          options: { redirectTo: `${window.location.origin}/` }
+          options: {
+            // Must land on the server-side PKCE exchange route (matching
+            // login/page.tsx's handleGoogleLogin), not '/' directly -- this
+            // app's client (src/utils/supabase/client.ts, createBrowserClient
+            // from @supabase/ssr) defaults to flowType 'pkce', so the OAuth
+            // redirect carries an authorization `?code=` that only
+            // /auth/callback/route.ts's server-side exchangeCodeForSession
+            // call can redeem into cookies. Landing on '/' directly leaves
+            // that code sitting unexchanged in the URL forever -- no session
+            // is ever established, so provider_token/provider_refresh_token
+            // never get captured (see the mount effect below) and
+            // /api/connectors/store-token is never called.
+            redirectTo: `${window.location.origin}/auth/callback`,
+            // Google only returns a refresh_token (needed for the backend's
+            // server-side token-refresh fallback -- see
+            // mcp_manager.create_workspace_session) on the FIRST consent for
+            // a given client/user, and only when explicitly asked for
+            // offline access. access_type=offline requests one at all;
+            // prompt=consent forces the consent screen every time so a
+            // returning user who silently re-authorizes still gets a fresh
+            // refresh_token (Google otherwise skips it on repeat, silent
+            // authorizations). select_account (space-combined with consent,
+            // per Google's OAuth spec allowing multiple prompt values) makes
+            // Google show the account chooser instead of silently
+            // re-authorizing whichever Google account is already signed in
+            // on this browser -- needed so a user who just disconnected one
+            // Google account can actually pick a different one on re-link,
+            // rather than being silently signed back into the same one.
+            // GitHub has no equivalent concept -- these params are simply
+            // meaningless there, not harmful.
+            ...(provider === 'google' ? { queryParams: { access_type: 'offline', prompt: 'select_account consent' } } : {})
+          }
         })
         if (error) throw error
       } catch (err) {
@@ -707,9 +851,84 @@ export default function Dashboard() {
       return
     }
 
+    // Google is linked, but neither a live in-memory access token nor a
+    // stored refresh_token backs it -- e.g. it was linked before the
+    // offline-access refresh-token flow existed, or via a plain sign-in
+    // through Google rather than this app's own connector toggle. The
+    // backend can never open a Workspace session for this user without
+    // one (mcp_manager.create_workspace_session), and simply retrying the
+    // link flow can't fix it -- Supabase's linkIdentity() refuses to
+    // re-run for a provider identity already linked to the current user.
+    // Surface that a disconnect+reconnect is required instead of silently
+    // flipping the toggle on and leaving Gmail/Docs/Calendar/Drive tool
+    // calls to silently fail to reach the model turn after turn.
+    if (isEnabling && provider === 'google' && !providerTokens.google && !hasStoredRefreshToken.google) {
+      setToast({
+        type: 'error',
+        message: 'Google is linked without offline access, so this can\'t work yet. Click the unlink icon next to Google below, then reconnect it to grant offline access.'
+      })
+      return
+    }
+
     setEnabledConnectors(prev =>
       isEnabling ? [...prev, connectorId] : prev.filter(id => id !== connectorId)
     )
+  }
+
+  // Fully unlinks a connector's provider identity: removes it from Supabase
+  // Auth (unlinkIdentity) so it stops counting as "linked" for linkIdentity's
+  // own re-prompt logic, deletes this user's stored refresh_token server-side
+  // (so the backend's token-refresh fallback can no longer act on their
+  // behalf -- see mcp_manager.create_workspace_session), and clears every
+  // piece of local state tied to that provider so the UI reflects "not
+  // connected" immediately rather than waiting for a reload.
+  const handleDisconnectConnector = async (provider: 'google' | 'github') => {
+    const label = provider === 'google' ? 'Google' : 'GitHub'
+
+    try {
+      const { data: { user: freshUser } } = await supabase.auth.getUser()
+      const identity = freshUser?.identities?.find(i => i.provider === provider)
+
+      if (identity) {
+        const { error } = await supabase.auth.unlinkIdentity(identity)
+        if (error) throw error
+      }
+
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token || ''
+      const response = await fetch(`/api/connectors/disconnect?provider=${provider}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (!response.ok) throw new Error('Failed to disconnect on the server.')
+
+      // Every google_* sub-connector (gmail/docs/calendar/drive) shares this
+      // one provider identity, so disconnecting 'google' must drop all of
+      // them at once, not just a single connector id.
+      setEnabledConnectors(prev =>
+        prev.filter(id => CONNECTORS.find(c => c.id === id)?.provider !== provider)
+      )
+      setLinkedProviders(prev => ({ ...prev, [provider]: false }))
+      setProviderTokens(prev => {
+        const next = { ...prev }
+        delete next[provider]
+        return next
+      })
+      setHasStoredRefreshToken(prev => ({ ...prev, [provider]: false }))
+
+      setToast({ type: 'success', message: `${label} account disconnected.` })
+    } catch (err: unknown) {
+      console.error(`Failed to disconnect ${provider}:`, err)
+      const errorObj = err as { message?: string }
+      // Supabase refuses to unlink a user's only remaining identity (they'd
+      // be locked out) -- surface that specific reason instead of a generic
+      // failure message, since it's an expected, actionable case rather
+      // than an actual bug.
+      const message = errorObj.message?.toLowerCase().includes('identities')
+        ? `Can't disconnect ${label} -- it's your only sign-in method.`
+        : `Failed to disconnect ${label}. Please try again.`
+      setToast({ type: 'error', message })
+    }
   }
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -1593,16 +1812,43 @@ export default function Dashboard() {
                             // persistent badge text, to keep the row minimal.
                             const isConnected = linkedProviders[connector.provider]
                             return (
-                              <button
+                              // A <div role="button"> rather than a real
+                              // <button> here -- the subtle Disconnect
+                              // icon-button below needs to live inside this
+                              // row, and a <button> nested inside another
+                              // <button> is invalid HTML (browsers auto-close
+                              // the outer one early, breaking the layout and
+                              // click handling both).
+                              <div
                                 key={connector.id}
-                                type="button"
+                                role="button"
+                                tabIndex={0}
                                 onClick={() => toggleConnector(connector.id, connector.provider)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault()
+                                    toggleConnector(connector.id, connector.provider)
+                                  }
+                                }}
                                 title={isConnected ? `${connector.label} is linked -- toggle to use it this turn` : `Click to link ${connector.label}`}
                                 className="w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium text-left transition-all cursor-pointer text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50"
                               >
                                 <div className="flex items-center gap-2">
                                   <Icon className="w-4 h-4" />
                                   <span>{connector.label}</span>
+                                  {isConnected && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleDisconnectConnector(connector.provider)
+                                      }}
+                                      title={`Disconnect ${connector.label}`}
+                                      className="p-0.5 rounded text-slate-300 hover:text-rose-500 dark:text-slate-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
+                                    >
+                                      <Unlink className="w-3 h-3" />
+                                    </button>
+                                  )}
                                 </div>
                                 <div
                                   className={`w-9 h-5 rounded-full transition-colors flex-shrink-0 ${isOn ? 'bg-gradient-to-r from-violet-600 to-cyan-500' : 'bg-slate-200 dark:bg-slate-700'}`}
@@ -1611,7 +1857,7 @@ export default function Dashboard() {
                                     className={`w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform mt-0.5 ${isOn ? 'translate-x-4' : 'translate-x-0.5'}`}
                                   />
                                 </div>
-                              </button>
+                              </div>
                             )
                           })}
                         </div>
