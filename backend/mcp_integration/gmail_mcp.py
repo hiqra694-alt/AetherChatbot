@@ -55,6 +55,35 @@ GMAIL_MCP_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
+
+def granted_scope_is_sufficient(token_response: dict) -> bool:
+    """
+    True iff `token_response` (the JSON body from either the authorization_
+    code or refresh_token grant against GOOGLE_OAUTH_TOKEN_URL) actually
+    carries GMAIL_MCP_SCOPE. Google always echoes back the scope it actually
+    granted -- as a space-delimited `scope` string -- on both grant types;
+    what's requested in build_google_authorize_url is only ever a request,
+    not a guarantee. It's silently narrowed (with no error at all, token
+    issuance still succeeds) whenever the requesting Google Cloud OAuth
+    client isn't fully authorized for a sensitive/restricted scope like
+    gmail.modify -- e.g. the scope was added to the OAuth consent screen
+    *after* this user's existing grant, or (for a Google Workspace account)
+    the org admin hasn't allow-listed this app for that scope under Admin
+    Console > Security > API controls. Either way, gmailmcp.googleapis.com
+    then rejects every tool call for that token with "The caller does not
+    have permission" -- a confusing failure two hops away from its actual
+    cause if nothing checks `scope` up front.
+
+    Missing `scope` entirely (some token responses omit it when the grant
+    is unchanged from a prior one) is treated as sufficient -- there's
+    nothing to contradict here, and failing closed on an absent field would
+    reject perfectly valid tokens.
+    """
+    granted = token_response.get("scope")
+    if not granted:
+        return True
+    return GMAIL_MCP_SCOPE in granted.split()
+
 # How long a signed `state` value (see sign_state/verify_state) stays valid
 # for -- comfortably longer than any human takes to complete the Google
 # consent screen, short enough that a leaked/logged state can't be replayed
@@ -256,9 +285,21 @@ async def refresh_gmail_mcp_access_token(supabase: Client, user_id: str) -> Opti
         logger.error("Gmail MCP: failed to refresh access token for user %s.", user_id, exc_info=True)
         return None
 
-    access_token = response.json().get("access_token")
+    payload = response.json()
+    access_token = payload.get("access_token")
     if not access_token:
         logger.error("Gmail MCP: Google's token endpoint returned no access_token for user %s.", user_id)
+        return None
+
+    if not granted_scope_is_sufficient(payload):
+        logger.error(
+            "Gmail MCP: refreshed access token for user %s is missing the required scope (%s) -- "
+            "granted scope was %r. This user's stored refresh token predates the scope now configured "
+            "on the OAuth client, or a Workspace admin hasn't approved this app for that scope. "
+            "Refusing to use it -- have the user disconnect and re-run the "
+            "/api/connectors/gmail-mcp/authorize consent flow to mint a token with the current scope.",
+            user_id, GMAIL_MCP_SCOPE, payload.get("scope"),
+        )
         return None
 
     return access_token

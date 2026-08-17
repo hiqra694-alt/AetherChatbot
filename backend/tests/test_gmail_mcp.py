@@ -9,10 +9,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mcp_integration.gmail_mcp import (
     GMAIL_MCP_PROVIDER,
+    GMAIL_MCP_SCOPE,
     build_google_authorize_url,
     build_service_role_client,
     exchange_code_for_tokens,
     get_gmail_mcp_refresh_token,
+    granted_scope_is_sufficient,
     refresh_gmail_mcp_access_token,
     resolve_user_id_from_access_token,
     sign_state,
@@ -256,6 +258,27 @@ async def test_get_gmail_mcp_refresh_token_no_row_returns_none():
 
 
 # ==================================================
+# granted_scope_is_sufficient -- catches Google silently narrowing the
+# granted scope below GMAIL_MCP_SCOPE (stale consent, unapproved Workspace
+# app, ...), which otherwise only ever surfaces as a "caller does not have
+# permission" error two hops away, on the first real tool call.
+# ==================================================
+
+def test_granted_scope_is_sufficient_when_scope_present():
+    assert granted_scope_is_sufficient({"scope": f"openid {GMAIL_MCP_SCOPE} email"}) is True
+
+
+def test_granted_scope_is_sufficient_false_when_scope_missing_from_grant():
+    assert granted_scope_is_sufficient({"scope": "openid email"}) is False
+
+
+def test_granted_scope_is_sufficient_true_when_scope_field_absent():
+    # Google omits `scope` on some responses when the grant is unchanged
+    # from a prior one -- nothing to contradict, so this must not fail closed.
+    assert granted_scope_is_sufficient({"access_token": "at"}) is True
+
+
+# ==================================================
 # exchange_code_for_tokens / refresh_gmail_mcp_access_token
 # ==================================================
 
@@ -372,6 +395,23 @@ async def test_refresh_gmail_mcp_access_token_success(monkeypatch):
     result = await refresh_gmail_mcp_access_token(supabase, "user-123")
 
     assert result == "fresh-access-token"
+
+
+@pytest.mark.asyncio
+async def test_refresh_gmail_mcp_access_token_insufficient_scope_returns_none(monkeypatch):
+    monkeypatch.setattr(
+        "mcp_integration.gmail_mcp.get_settings",
+        lambda: _FakeSettings(gmail_mcp_client_id="id", gmail_mcp_client_secret="secret"),
+    )
+    supabase, _ = _mock_oauth_supabase(rows=[{"refresh_token": "stored-refresh-token"}])
+    monkeypatch.setattr(
+        "mcp_integration.gmail_mcp.httpx.AsyncClient",
+        _fake_async_client(_FakeHttpResponse({"access_token": "fresh-access-token", "scope": "openid email"})),
+    )
+
+    result = await refresh_gmail_mcp_access_token(supabase, "user-123")
+
+    assert result is None
 
 
 @pytest.mark.asyncio

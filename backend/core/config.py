@@ -96,6 +96,33 @@ class Settings(BaseSettings):
         False, validation_alias=AliasChoices("gmail_mcp_dev_mode", "GMAIL_MCP_DEV_MODE")
     )
 
+    # Canvas Drive connector (Phase 1, canvas/drive_oauth.py + canvas/router.py):
+    # a fully separate OAuth client from google_client_id/google_client_secret
+    # and gmail_mcp_client_id/gmail_mcp_client_secret above -- this one talks
+    # directly to Google's OAuth endpoints requesting the restrictive
+    # drive.file scope, and its refresh token is stored under the distinct
+    # 'google_drive' user_oauth_tokens row, never the 'google' or
+    # 'google_gmail_mcp' rows. All three must be set for
+    # /api/canvas/drive/authorize to work; empty by default -- that route
+    # 503s until configured.
+    canvas_drive_client_id: str = Field(
+        "", validation_alias=AliasChoices("canvas_drive_client_id", "CANVAS_DRIVE_CLIENT_ID")
+    )
+    canvas_drive_client_secret: str = Field(
+        "", validation_alias=AliasChoices("canvas_drive_client_secret", "CANVAS_DRIVE_CLIENT_SECRET")
+    )
+    canvas_drive_redirect_uri: str = Field(
+        "", validation_alias=AliasChoices("canvas_drive_redirect_uri", "CANVAS_DRIVE_REDIRECT_URI")
+    )
+
+    # Local-development-only escape hatch (canvas/router.py): when true, GET
+    # /api/canvas/drive/authorize additionally accepts a `dev_user_id` query
+    # param as an UNVERIFIED substitute for a real Supabase `access_token`.
+    # False by default -- must never be set in any deployed environment.
+    canvas_drive_dev_mode: bool = Field(
+        False, validation_alias=AliasChoices("canvas_drive_dev_mode", "CANVAS_DRIVE_DEV_MODE")
+    )
+
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
         env_file_encoding="utf-8",

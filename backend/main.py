@@ -13,6 +13,7 @@ from api.tasks.routers import router as tasks_router
 from core.scheduler import run_scheduler_loop
 from mcp_integration.mcp_manager import mcp_manager, get_merged_tool_schemas
 from mcp_integration.gmail_mcp_router import router as gmail_mcp_router
+from canvas.router import router as canvas_router
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -74,6 +75,10 @@ app.include_router(tasks_router)
 # mcp_integration/gmail_mcp_router.py. Never touches connectors_router or
 # the Supabase identity-linking flow it backs.
 app.include_router(gmail_mcp_router)
+# Canvas feature (Phase 1) -- fully isolated Google Drive OAuth + export
+# routes, see canvas/router.py. Never touches intent_router.py or the Gmail
+# MCP files.
+app.include_router(canvas_router)
 
 if __name__ == "__main__":
     import uvicorn

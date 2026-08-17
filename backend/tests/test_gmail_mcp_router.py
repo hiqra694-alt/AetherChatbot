@@ -197,6 +197,29 @@ def test_callback_no_refresh_token_returns_502(mock_exchange, mock_verify_state)
 
 @patch("mcp_integration.gmail_mcp_router.verify_state", return_value="user-123")
 @patch("mcp_integration.gmail_mcp_router.exchange_code_for_tokens", new_callable=AsyncMock)
+@patch("mcp_integration.gmail_mcp_router.store_gmail_mcp_tokens", new_callable=AsyncMock)
+def test_callback_insufficient_scope_returns_403_and_does_not_store(mock_store, mock_exchange, mock_verify_state):
+    """Google can silently narrow the granted scope below GMAIL_MCP_SCOPE
+    (stale consent screen, unapproved Workspace app, ...) -- caught here at
+    link time so a token that would fail every later tool call is never
+    persisted in the first place."""
+    mock_exchange.return_value = {
+        "access_token": "at",
+        "refresh_token": "rt",
+        "scope": "openid email",  # no gmail.modify
+    }
+
+    response = client.get(
+        "/api/connectors/gmail-mcp/callback",
+        params={"code": "auth-code", "state": "valid-state"},
+    )
+
+    assert response.status_code == 403
+    mock_store.assert_not_awaited()
+
+
+@patch("mcp_integration.gmail_mcp_router.verify_state", return_value="user-123")
+@patch("mcp_integration.gmail_mcp_router.exchange_code_for_tokens", new_callable=AsyncMock)
 @patch("mcp_integration.gmail_mcp_router.build_service_role_client", return_value=None)
 def test_callback_no_service_role_key_returns_503(mock_build_client, mock_exchange, mock_verify_state):
     mock_exchange.return_value = {"access_token": "at", "refresh_token": "rt"}

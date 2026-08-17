@@ -19,9 +19,11 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from core.config import get_settings
 from mcp_integration.gmail_mcp import (
+    GMAIL_MCP_SCOPE,
     build_google_authorize_url,
     exchange_code_for_tokens,
     build_service_role_client,
+    granted_scope_is_sufficient,
     resolve_user_id_from_access_token,
     sign_state,
     store_gmail_mcp_tokens,
@@ -143,6 +145,28 @@ async def gmail_mcp_callback(
         raise HTTPException(
             status_code=502,
             detail="Google did not return a refresh token. Disconnect any prior grant and try again.",
+        )
+
+    # Catch an under-scoped grant here, at link time, rather than storing a
+    # refresh token that will mint access tokens gmailmcp.googleapis.com
+    # rejects on every tool call with a "caller does not have permission"
+    # error -- see gmail_mcp.granted_scope_is_sufficient for why Google can
+    # silently narrow the granted scope below what was requested/consented.
+    if not granted_scope_is_sufficient(tokens):
+        logger.error(
+            "Gmail MCP: token exchange for user %s did not grant the required scope (%s) -- "
+            "granted scope was %r.", user_id, GMAIL_MCP_SCOPE, tokens.get("scope"),
+        )
+        return HTMLResponse(
+            "<h1>Gmail MCP connection incomplete</h1>"
+            "<p>Google did not grant the Gmail permission this app requires "
+            f"(<code>{GMAIL_MCP_SCOPE}</code>). This usually means either the OAuth consent screen's "
+            "scope was changed after you last approved this app, or -- for a Google Workspace account -- "
+            "your organization's admin hasn't approved this app for Gmail access under "
+            "Admin Console &gt; Security &gt; API controls &gt; App access control. "
+            "Go to <a href=\"https://myaccount.google.com/permissions\">Google Account &gt; Security &gt; "
+            "Third-party access</a>, remove this app's access, then retry the connection.</p>",
+            status_code=403,
         )
 
     supabase = build_service_role_client()

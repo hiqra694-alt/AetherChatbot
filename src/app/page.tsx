@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/utils/supabase/client'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import CanvasWorkspace from '@/components/CanvasWorkspace'
 import {
   Plus,
   MessageSquare,
@@ -42,7 +43,10 @@ import {
   Calendar,
   HardDrive,
   MoreVertical,
-  Unlink
+  Unlink,
+  PanelRightOpen,
+  PanelRightClose,
+  ExternalLink
 } from 'lucide-react'
 
 interface UserProfile {
@@ -63,6 +67,11 @@ interface Source {
   snippet: string
 }
 
+interface CanvasDocument {
+  title: string
+  content: string
+}
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -70,6 +79,10 @@ interface Message {
   provider_used?: string
   sources?: Source[]
   attachedFileName?: string
+  // Set when this turn's raw content contained a <canvas>...</canvas> block
+  // (see parseCanvasStream) -- the chat bubble renders a placeholder card
+  // instead of the raw markdown in that case, see the messages.map render.
+  canvasDocument?: CanvasDocument
 }
 
 interface MemoryProfile {
@@ -119,6 +132,85 @@ const PROVIDERS = [
   { id: 'groq', name: 'Groq LPU', icon: Cpu, color: 'text-blue-600 bg-blue-50 border-blue-200 hover:bg-blue-100', accentColor: 'blue' },
   { id: 'mock', name: 'Mock AI Provider', icon: Bot, color: 'text-slate-600 bg-slate-50 border-slate-200 hover:bg-slate-100', accentColor: 'slate' }
 ]
+
+// Canvas (Phase 4): matches the SYSTEM_PROMPT's "## Canvas documents" rule
+// (see backend/api/chat/services.py) that instructs the model to wrap an
+// entire long-form response in these tags. Module-level and pure (no
+// component state) since both the live SSE loop (handleSendMessage) and the
+// persisted-history loader (fetchMessages) need to run the exact same
+// extraction against a raw content string.
+const CANVAS_OPEN_TAG = '<canvas>'
+const CANVAS_CLOSE_TAG = '</canvas>'
+
+interface ParsedCanvasStream {
+  /** `raw` with the entire <canvas>...</canvas> region (or, mid-stream, everything from <canvas> onward) removed -- this is what the chat bubble renders. */
+  chatText: string
+  /** The content between the tags, or everything after <canvas> so far if the closing tag hasn't streamed in yet. null if no <canvas> tag is present at all. */
+  canvasContent: string | null
+}
+
+function parseCanvasStream(raw: string): ParsedCanvasStream {
+  const openIdx = raw.indexOf(CANVAS_OPEN_TAG)
+  if (openIdx === -1) {
+    return { chatText: raw, canvasContent: null }
+  }
+
+  const beforeTag = raw.slice(0, openIdx)
+  const afterOpen = raw.slice(openIdx + CANVAS_OPEN_TAG.length)
+  const closeIdx = afterOpen.indexOf(CANVAS_CLOSE_TAG)
+
+  if (closeIdx === -1) {
+    // Still streaming the document -- everything seen after <canvas> so far
+    // is document content, not chat text, even though </canvas> hasn't
+    // arrived yet.
+    return { chatText: beforeTag, canvasContent: afterOpen }
+  }
+
+  const canvasContent = afterOpen.slice(0, closeIdx)
+  const afterClose = afterOpen.slice(closeIdx + CANVAS_CLOSE_TAG.length)
+  return { chatText: `${beforeTag}${afterClose}`, canvasContent }
+}
+
+// Best-effort title for the canvas panel/placeholder card -- pulled from the
+// document's own content rather than asking the model for a separate title
+// out-of-band. Both CanvasWorkspace's header and the chat bubble placeholder
+// card key off this same function (see the live SSE loop, the final flush,
+// and fetchMessages below), so a better title here improves both instantly.
+function deriveCanvasTitle(markdown: string): string {
+  const trimmed = markdown.trim()
+  if (!trimmed) return 'Untitled Canvas Document'
+
+  // Strongest signal: an explicit H1, then H2 heading -- strip markdown
+  // emphasis chars so e.g. "# **Patriotism**" reads as "Patriotism".
+  const headingMatch = trimmed.match(/^\s{0,3}#{1,2}\s+(.+)$/m)
+  if (headingMatch) {
+    const heading = headingMatch[1].replace(/[*_`]/g, '').trim()
+    if (heading) return heading.slice(0, 80)
+  }
+
+  // No heading yet (still streaming before one has arrived, or the model
+  // wrote prose without one) -- fall back to the first non-empty line,
+  // stripped of leading markdown punctuation (list/quote markers, stray
+  // '#'s) and truncated to ~7 words, so it still reads as a title rather
+  // than a mid-sentence fragment.
+  const firstLine = trimmed.split(/\r?\n/).find(line => line.trim().length > 0) || ''
+  const cleanedLine = firstLine.replace(/^[#>\-*\s]+/, '').replace(/[*_`]/g, '').trim()
+  if (!cleanedLine) return 'Untitled Canvas Document'
+
+  const words = cleanedLine.split(/\s+/)
+  const title = words.slice(0, 7).join(' ')
+  return (words.length > 7 ? `${title}…` : title).slice(0, 80)
+}
+
+// Upper bound on how often a still-streaming canvas document is flushed into
+// canvasDoc (the CanvasWorkspace panel's state), independent of how often
+// chat tokens arrive. CanvasWorkspace calls editor.commands.setContent() on
+// every genuinely new `content` value it receives (see its guarded sync
+// effect), which fully replaces the ProseMirror doc -- doing that on every
+// single streamed token (which can arrive many times a second) would visibly
+// thrash the editor. This keeps updates feeling live (~8/sec) while bounding
+// the update rate, satisfying Phase 4's "Render Stability" requirement.
+const CANVAS_STREAM_FLUSH_INTERVAL_MS = 120
 
 export default function Dashboard() {
   const router = useRouter()
@@ -199,6 +291,18 @@ export default function Dashboard() {
   // since nothing pushes these to the client in real time.
   const [dueReminders, setDueReminders] = useState<Task[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+
+  // Canvas (Phase 2): split-pane TipTap document panel rendered to the right
+  // of the chat thread. `canvasDoc` is only ever replaced wholesale (a new
+  // object) when a genuinely new document is opened -- CanvasWorkspace is
+  // memoized on it, so streaming chat tokens updating `messages` elsewhere
+  // in this component never cause the (expensive) editor tree to re-render.
+  const [canvasOpen, setCanvasOpen] = useState(false)
+  const [canvasDoc, setCanvasDoc] = useState<{ title: string; content: string }>({
+    title: 'Untitled Canvas Document',
+    content: '',
+  })
+  const handleCloseCanvas = useCallback(() => setCanvasOpen(false), [])
   const [loadingReminders, setLoadingReminders] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -540,13 +644,24 @@ export default function Dashboard() {
               console.error("Error parsing embedded sources:", e)
             }
           }
-          
+
+          // Extract a <canvas> document persisted from a past turn (see
+          // parseCanvasStream -- same extraction the live SSE loop uses).
+          let canvasDocument: CanvasDocument | undefined
+          const canvasParsed = parseCanvasStream(content)
+          if (canvasParsed.canvasContent !== null) {
+            const trimmedCanvasContent = canvasParsed.canvasContent.trim()
+            canvasDocument = { title: deriveCanvasTitle(trimmedCanvasContent), content: trimmedCanvasContent }
+            content = canvasParsed.chatText
+          }
+
           return {
             id: msg.id,
             role: msg.role,
             content: content.trim(),
             provider_used: msg.provider_used,
-            sources: sources
+            sources: sources,
+            canvasDocument
           }
         })
         setMessages(parsedMessages)
@@ -983,6 +1098,11 @@ export default function Dashboard() {
       let streamedContent = ''
       let streamedSources: Source[] | undefined = undefined
       let firstChunkReceived = false
+      // Last time canvasDoc (the CanvasWorkspace panel's state) was flushed
+      // during this stream -- see CANVAS_STREAM_FLUSH_INTERVAL_MS. 0 means
+      // "not yet flushed", so the very first canvas chunk always flushes
+      // immediately rather than waiting out the first interval.
+      let lastCanvasFlush = 0
       setMessages(prev => [...prev, { id: 'temp', role: 'assistant', content: '', provider_used: selectedProvider }])
 
       const { data: { session } } = await supabase.auth.getSession()
@@ -1057,11 +1177,30 @@ export default function Dashboard() {
                   setIsLoading(false)
                 }
                 streamedContent += parsed.content
+
+                const canvasParsed = parseCanvasStream(streamedContent)
+                let liveCanvasDocument: CanvasDocument | undefined
+                if (canvasParsed.canvasContent !== null) {
+                  liveCanvasDocument = {
+                    title: deriveCanvasTitle(canvasParsed.canvasContent),
+                    content: canvasParsed.canvasContent,
+                  }
+                  // Idempotent -- React bails out on an identical boolean, so
+                  // calling this on every chunk once the tag is open is safe.
+                  setCanvasOpen(true)
+                  const now = Date.now()
+                  if (lastCanvasFlush === 0 || now - lastCanvasFlush >= CANVAS_STREAM_FLUSH_INTERVAL_MS) {
+                    lastCanvasFlush = now
+                    setCanvasDoc({ title: liveCanvasDocument.title, content: canvasParsed.canvasContent })
+                  }
+                }
+
                 setMessages(prev => {
                   const newMsgs = [...prev]
                   const last = newMsgs[newMsgs.length - 1]
                   if (last && last.role === 'assistant') {
-                    last.content = streamedContent
+                    last.content = canvasParsed.chatText
+                    last.canvasDocument = liveCanvasDocument
                     if (streamedSources) last.sources = streamedSources
                   }
                   return newMsgs
@@ -1085,12 +1224,14 @@ export default function Dashboard() {
                 // until the real answer starts arriving.
                 streamedContent = ''
                 firstChunkReceived = false
+                lastCanvasFlush = 0
                 setIsLoading(true)
                 setMessages(prev => {
                   const newMsgs = [...prev]
                   const last = newMsgs[newMsgs.length - 1]
                   if (last && last.role === 'assistant') {
                     last.content = ''
+                    last.canvasDocument = undefined
                   }
                   return newMsgs
                 })
@@ -1122,23 +1263,42 @@ export default function Dashboard() {
         }
       }
 
+      // Parsed against `streamedContent` (not the error-notice-appended text
+      // below) so that if a streamError cuts generation off mid-document, the
+      // warning notice lands in the chat bubble rather than getting balled
+      // up into the (now unclosed) canvas document's content.
+      const finalCanvasParsed = parseCanvasStream(streamedContent)
+      const finalCanvasDocument: CanvasDocument | undefined =
+        finalCanvasParsed.canvasContent !== null
+          ? { title: deriveCanvasTitle(finalCanvasParsed.canvasContent), content: finalCanvasParsed.canvasContent.trim() }
+          : undefined
+
+      // Final, un-throttled flush -- guarantees canvasDoc ends up with the
+      // exact final content even if the last streamed chunk arrived within
+      // CANVAS_STREAM_FLUSH_INTERVAL_MS of the previous flush.
+      if (finalCanvasDocument) {
+        setCanvasDoc(finalCanvasDocument)
+        setCanvasOpen(true)
+      }
+
       // A streamError from the backend (e.g. Groq failed to format a tool
       // call) means generation was cut short mid-response, not that nothing
       // happened — `streamedContent` may already hold real, valid text the
       // user has been watching stream in. Append an inline notice instead of
       // throwing, so that partial answer is preserved rather than replaced
       // wholesale by an error bubble.
-      const finalContent = streamError
-        ? `${streamedContent}${streamedContent.trim() ? '\n\n' : ''}⚠️ *The agent encountered an error formatting its response. Please try again.*`
-        : streamedContent
+      const finalChatText = streamError
+        ? `${finalCanvasParsed.chatText}${finalCanvasParsed.chatText.trim() ? '\n\n' : ''}⚠️ *The agent encountered an error formatting its response. Please try again.*`
+        : finalCanvasParsed.chatText
 
       // 4. Once streaming is complete, append the assistant response to messages state
       const mockAssistantMsg: Message = {
         id: Math.random().toString(),
         role: 'assistant',
-        content: finalContent,
+        content: finalChatText,
         provider_used: selectedProvider,
-        sources: streamedSources || undefined
+        sources: streamedSources || undefined,
+        canvasDocument: finalCanvasDocument
       }
 
       setMessages(prev => {
@@ -1504,10 +1664,31 @@ export default function Dashboard() {
           </button>
         )}
 
-        {/* Floating Notification Bell -- fixed to the viewport (not the
-            scrolling chat thread below), replacing the old full-width top
-            header bar entirely to reclaim vertical space. */}
-        <div className="fixed top-4 right-4 z-50">
+        {/* Canvas toggle (Phase 2) -- opens/closes the split-pane TipTap
+            document panel to the right of the chat thread. Placed just left
+            of the bell, same floating circular treatment.
+
+            `absolute` (not `fixed`) is deliberate: this section is already
+            `relative`, and CanvasWorkspace mounts as its flex sibling, so
+            this section's own right edge automatically moves left to sit at
+            the chat/canvas boundary whenever the panel is open -- anchoring
+            here (rather than the viewport) means `right-16` always lands in
+            the remaining chat space with zero overlap, at any viewport
+            width or sidebar state, with no hardcoded panel-width guess. */}
+        <button
+          type="button"
+          onClick={() => setCanvasOpen(prev => !prev)}
+          className="absolute top-4 right-16 z-50 p-2 rounded-full border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 transition-all cursor-pointer"
+          title={canvasOpen ? 'Close canvas' : 'Open canvas'}
+        >
+          {canvasOpen ? <PanelRightClose className="w-5 h-5" /> : <PanelRightOpen className="w-5 h-5" />}
+        </button>
+
+        {/* Floating Notification Bell -- anchored to this section (see the
+            canvas toggle above for why `absolute` replaces `fixed` here),
+            replacing the old full-width top header bar entirely to reclaim
+            vertical space. */}
+        <div className="absolute top-4 right-4 z-50">
           <button
             type="button"
             onClick={() => setNotificationsOpen(prev => !prev)}
@@ -1673,7 +1854,53 @@ export default function Dashboard() {
                           {/* Content Body — while the placeholder is still empty and a
                               request is in flight, show the loading indicator in its
                               place instead of a second bubble/avatar below it. */}
-                          {!message.content && isLoading ? (
+                          {message.canvasDocument ? (
+                            /* A <canvas>...</canvas> block was detected for this turn
+                               (see parseCanvasStream) -- its raw markdown lives in
+                               canvasDoc/CanvasWorkspace, never duplicated into this
+                               bubble. Any real chat text surrounding the tags (there
+                               normally isn't any, per the SYSTEM_PROMPT rule) still
+                               renders above the placeholder card. */
+                            <div className="space-y-3">
+                              {message.content.trim() && (
+                                <div className="text-[15px] leading-relaxed select-text break-words text-slate-800 dark:text-slate-200">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {message.content}
+                                  </ReactMarkdown>
+                                </div>
+                              )}
+                              <div className="group flex items-center gap-3 px-4 py-3 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 hover:border-violet-300 dark:hover:border-violet-600 transition-all w-full sm:w-auto sm:max-w-sm">
+                                <div className="w-9 h-9 flex-shrink-0 rounded-lg bg-gradient-to-tr from-violet-600 to-cyan-500 flex items-center justify-center shadow-sm">
+                                  <FileText className="w-4.5 h-4.5 text-white" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 truncate">
+                                    {message.canvasDocument.title}
+                                  </p>
+                                  <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                                    Generated document
+                                  </p>
+                                </div>
+                                {/* Every card gets its own explicit open action -- each message
+                                    carries its own canvasDocument (see fetchMessages/parseCanvasStream
+                                    above), so this always swaps canvasDoc to *this* card's document,
+                                    letting the user toggle between any past document in the thread. */}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCanvasDoc(message.canvasDocument!)
+                                    setCanvasOpen(true)
+                                  }}
+                                  title={`Open "${message.canvasDocument.title}" in Canvas`}
+                                  aria-label={`Open "${message.canvasDocument.title}" in Canvas`}
+                                  className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors cursor-pointer"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                  <span>Open in Canvas</span>
+                                </button>
+                              </div>
+                            </div>
+                          ) : !message.content && isLoading ? (
                             <div className="flex items-center gap-2 pt-1 text-slate-400 dark:text-slate-500">
                               <div className="flex items-center gap-1.5">
                                 <span className="w-2 h-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -1950,6 +2177,16 @@ export default function Dashboard() {
           </div>
         </footer>
       </section>
+
+      {/* Canvas Workspace (Phase 2) -- conditionally rendered split-pane
+          panel to the right of the chat thread, see CanvasWorkspace.tsx. */}
+      {canvasOpen && (
+        <CanvasWorkspace
+          title={canvasDoc.title}
+          content={canvasDoc.content}
+          onClose={handleCloseCanvas}
+        />
+      )}
 
       {/* MODALS */}
 
