@@ -3,7 +3,8 @@
 import { useState, useEffect, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/utils/supabase/client'
-import { Bot, Mail, Lock, Loader2, Sparkles } from 'lucide-react'
+import { Mail, Lock, Loader2, Sparkles } from 'lucide-react'
+import AetherLogo from '@/components/AetherLogo'
 
 function LoginForm() {
   const router = useRouter()
@@ -107,11 +108,9 @@ function LoginForm() {
       <div className="w-full max-w-md p-8 bg-white/90 backdrop-blur-xl border border-slate-200/80 rounded-2xl shadow-xl relative z-10 mx-4">
         {/* Header */}
         <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 bg-gradient-to-tr from-violet-600 to-cyan-500 rounded-xl flex items-center justify-center shadow-lg shadow-violet-500/10 mb-4 animate-pulse">
-            <Bot className="w-8 h-8 text-white" />
-          </div>
+          <AetherLogo size={56} className="mb-4" />
           <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-slate-900 via-slate-700 to-slate-500">
-            AetherChat
+            Aether
           </h1>
           <p className="text-sm text-slate-500 mt-2 flex items-center gap-1.5 font-medium">
             <Sparkles className="w-3.5 h-3.5 text-violet-500" />

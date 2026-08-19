@@ -7,11 +7,12 @@ reimplemented here, only argument pass-through.
   - Retrieval: api.documents.services.get_relevant_context, the same hybrid
     (Supabase RPC + local BM25/cross-encoder rerank) retrieval function
     api/chat/services.py calls to ground text chat responses.
-  - Native tools: api.chat.tools' calculator/get_current_time/get_weather/
-    search_chat_history (BASE_TOOLS) plus create_task/list_tasks/
-    complete_task -- the exact functions text chat wraps for the same
-    capabilities, called directly here by name instead of being
-    reimplemented.
+  - Native tools: every tool in api.chat.tools.ALL_TOOLS --
+    calculator/get_current_time/get_weather/search_chat_history (BASE_TOOLS)
+    plus duckduckgo_search/search_knowledge_base/list_documents/
+    create_task/list_tasks/complete_task -- the exact functions text chat
+    wraps for the same capabilities, called directly here by name instead
+    of being reimplemented.
   - MCP execution: mcp_integration.mcp_manager's singleton `mcp_manager`,
     the same MCPClientManager api/chat/services.py routes generic MCP tool
     calls through (see its "Executing MCP Tool" branch).
@@ -64,8 +65,10 @@ from api.chat.tools import ALL_TOOL_NAMES
 from api.chat.tools import calculator as _calculator
 from api.chat.tools import complete_task as _complete_task
 from api.chat.tools import create_task as _create_task
+from api.chat.tools import duckduckgo_search as _duckduckgo_search
 from api.chat.tools import get_current_time as _get_current_time
 from api.chat.tools import get_weather as _get_weather
+from api.chat.tools import list_documents as _list_documents
 from api.chat.tools import list_tasks as _list_tasks
 from api.chat.tools import search_chat_history as _search_chat_history
 from api.documents.services import format_retrieved_chunks, get_relevant_context
@@ -103,6 +106,37 @@ class VoiceTools(Toolset):
 
         chunks = await get_relevant_context(self._supabase, query, self._user_id, self._session_id)
         return format_retrieved_chunks(chunks)
+
+    @function_tool
+    async def list_documents(self) -> str:
+        """Lists the exact names of every document the user has uploaded to
+        their knowledge base. Call this when the user asks what documents
+        you have access to, or what they've uploaded -- not for questions
+        about what's inside a document, which search_knowledge_base answers
+        instead.
+        """
+        if not (self._supabase and self._user_id):
+            return json.dumps({"error": "No authenticated user to scope the document list to."})
+        return await _list_documents(self._supabase, self._user_id, self._session_id or "")
+
+    @function_tool
+    async def duckduckgo_search(self, search_query: str) -> str:
+        """Searches the live web. Defines an epistemic boundary: only call
+        this when your own knowledge is genuinely insufficient or
+        unreliable for the question, not as a default first step.
+
+        WHEN TO USE: real-time external events, breaking news, live
+        weather, prices, scores, or anything that can change after your
+        training cutoff; or a highly niche/conflicting domain acronym or
+        term where you are not confident which of several plausible
+        meanings applies. WHEN NOT TO USE: foundational concepts,
+        well-established definitions, or general world facts already in
+        your own knowledge -- answer those directly instead.
+
+        Args:
+            search_query: The optimized search query to look up on the web.
+        """
+        return await _duckduckgo_search(search_query)
 
     @function_tool
     async def get_weather(self, city: str, unit: str = "celsius") -> str:

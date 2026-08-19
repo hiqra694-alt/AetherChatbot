@@ -128,7 +128,8 @@ from livekit.plugins import cartesia, deepgram, groq
 from supabase import Client, create_client
 
 from core.config import get_settings
-from voice.prompts import VOICE_SYSTEM_PROMPT
+from mcp_integration.mcp_manager import mcp_manager
+from voice.prompts import VOICE_SYSTEM_PROMPT, build_mcp_tools_prompt_block
 from voice.tools_adapter import VoiceTools
 
 logger = logging.getLogger(__name__)
@@ -136,15 +137,44 @@ logger = logging.getLogger(__name__)
 # Phase 4: how many of the most recent persisted turns to seed a new voice
 # session's ChatContext with -- enough for the agent to pick up an ongoing
 # text conversation without paying for an unbounded history fetch/replay.
-CHAT_HISTORY_LIMIT = 10
+# Lowered from 10 -> 5 (Phase 6 latency pass): every seeded turn is replayed
+# into the LLM's own prompt on top of the live system prompt + MCP tool
+# block on *every* turn thereafter, so this directly sets the token floor
+# each request pays against Groq's per-minute token budget (see
+# GROQ_LLM_MODEL below) -- 10 turns of history was a meaningful contributor
+# to the 8,000 TPM 429s seen on openai/gpt-oss-120b before this pass.
+CHAT_HISTORY_LIMIT = 5
 
-# Phase 5: how long Deepgram waits after detecting silence before emitting
-# UtteranceEnd (the cloud-side signal turn_detection="stt" listens for --
-# see the module docstring). Deepgram's API floors this at 1000ms; going
-# lower is silently not honored server-side, so this is the fastest turn-
-# taking this mode can actually deliver. requires interim_results=True,
-# which is this plugin's own default.
+# Phase 6 (Latency Tuning): Deepgram's two independent turn-ending signals,
+# both wired to livekit-agents' turn_detection="stt" (see the module
+# docstring) -- deepgram.stt's _process_stream_event emits END_OF_SPEECH on
+# whichever fires first:
+#
+# - `speech_final` (driven by `endpointing_ms`, Deepgram's actual
+#   `endpointing` query param): fires once this many ms of silence follow a
+#   final word. This is the primary, fast path -- 300ms is a deliberate
+#   balance (Deepgram's own low end) between "commits promptly" and "doesn't
+#   cut the user off mid-thought" on a brief pause.
+# - `UtteranceEnd` (driven by `utterance_end_ms`): a slower fallback for
+#   when speech_final never fires at all (e.g. noisy audio Deepgram can't
+#   confidently mark final). Deepgram's API floors this at 1000ms --
+#   requesting lower is silently not honored server-side -- so it stays a
+#   safety net, not the primary latency lever; STT_ENDPOINTING_MS above is
+#   what actually delivers the <500ms turn-commit target.
+#
+# Both require interim_results=True, which is this plugin's own default.
+STT_ENDPOINTING_MS = 300
 STT_UTTERANCE_END_MS = 1000
+
+# Phase 6 (Rate Limit Fix): openai/gpt-oss-120b was hitting Groq's 8,000 TPM
+# limit on this account/model tier, surfacing as repeated 429 RateLimitError
+# retries (visible as exponential-backoff stalls mid-turn -- the opposite of
+# the low-latency turn-taking this worker is tuned for elsewhere in this
+# file). llama-3.1-8b-instant is Groq's fastest-inference production model
+# (see livekit.plugins.groq.models.LLMModels) and comfortably fits within
+# an 8,000 TPM budget for a conversational turn -- swapping to it fixes the
+# rate limit and cuts LLM time-to-first-token, both at once.
+GROQ_LLM_MODEL = "llama-3.1-8b-instant"
 
 # Dedicated thread pool for this module's own blocking, off-loop Supabase
 # work (chat-history fetch + turn persistence) -- deliberately NOT asyncio's
@@ -154,6 +184,30 @@ STT_UTTERANCE_END_MS = 1000
 # quick calls per job, and keeping it small caps how much OS-thread overhead
 # one worker process can accrue.
 _ISOLATED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="voice-io")
+
+# Guards mcp_manager.initialize(): unlike main.py's FastAPI process (see its
+# lifespan calling mcp_manager.initialize() once at app startup), this voice
+# worker is a wholly separate process (see module docstring) that never runs
+# that lifespan -- so without this, mcp_manager._connections stays empty
+# here forever and VoiceTools.execute_mcp_tool's mcp_manager.call_tool would
+# silently find zero connected MCP servers even with e.g. GitHub fully
+# configured. Lazily initialized on this process's first job instead of at
+# import time, since initialize() makes network connections and belongs in
+# an async context; the lock + flag ensure concurrent jobs in the same
+# worker process only ever pay the connect cost once.
+_mcp_manager_init_lock = asyncio.Lock()
+_mcp_manager_initialized = False
+
+
+async def _ensure_mcp_manager_initialized() -> None:
+    global _mcp_manager_initialized
+    if _mcp_manager_initialized:
+        return
+    async with _mcp_manager_init_lock:
+        if _mcp_manager_initialized:
+            return
+        await mcp_manager.initialize()
+        _mcp_manager_initialized = True
 
 
 class _ProcessLoadCalc:
@@ -375,6 +429,8 @@ def _bind_state_sync(session: AgentSession, supabase: Optional[Client], session_
         if not isinstance(item, llm.ChatMessage) or item.role not in ("user", "assistant"):
             return
 
+        logger.info(f"🎙️ [Voice {item.role.upper()}]: {item.content}")
+
         text = item.text_content
         if not text:
             return
@@ -405,15 +461,33 @@ async def entrypoint(ctx: JobContext):
     voice_tools = VoiceTools()
     voice_tools.bind_context(supabase, user_id, session_id)
 
-    # Phase 4: seed the agent with this session's recent history before it
-    # ever speaks, so it picks up an ongoing conversation instead of
-    # starting cold. Run via _ISOLATED_EXECUTOR (not called inline) so this
-    # synchronous Supabase round trip never blocks the event loop even
-    # before the audio pipeline starts -- same isolation rationale as
-    # _bind_state_sync above.
+    # Phase 4/6: seed the agent with this session's recent history, and make
+    # sure this process's mcp_manager has connected to its configured MCP
+    # servers (see _ensure_mcp_manager_initialized above) so the prompt can
+    # list what's actually reachable through execute_mcp_tool -- otherwise
+    # the model has no way to know an MCP tool exists at all. See
+    # build_mcp_tools_prompt_block's docstring for why this is injected
+    # into the prompt rather than registered as individual per-tool
+    # @function_tool methods.
+    #
+    # Neither depends on the other's result, and `ctx.connect()` /
+    # `wait_for_participant()` above have already put the room's media
+    # negotiation in flight -- so both run concurrently via asyncio.gather
+    # instead of one after another, and neither is on the media path at
+    # all: the Supabase fetch is off-loop on _ISOLATED_EXECUTOR (never
+    # asyncio's default executor, so a slow DB round trip can't compete
+    # with STT/TTS callbacks for worker-thread time -- see module
+    # docstring), and mcp_manager's own connect()s are already async I/O.
+    # This only delays when the *agent* starts talking, never the room join
+    # itself.
     loop = asyncio.get_running_loop()
-    chat_ctx = await loop.run_in_executor(_ISOLATED_EXECUTOR, _fetch_recent_chat_context, supabase, session_id)
-    agent_instance = Agent(instructions=VOICE_SYSTEM_PROMPT, tools=[voice_tools], chat_ctx=chat_ctx)
+    chat_ctx, _ = await asyncio.gather(
+        loop.run_in_executor(_ISOLATED_EXECUTOR, _fetch_recent_chat_context, supabase, session_id),
+        _ensure_mcp_manager_initialized(),
+    )
+    instructions = VOICE_SYSTEM_PROMPT + build_mcp_tools_prompt_block(mcp_manager.list_cached_tools())
+
+    agent_instance = Agent(instructions=instructions, tools=[voice_tools], chat_ctx=chat_ctx)
 
     # api_key is passed explicitly to every plugin below rather than left
     # for them to fall back to reading os.environ -- see the module
@@ -455,9 +529,10 @@ async def entrypoint(ctx: JobContext):
         stt=deepgram.STT(
             api_key=settings.deepgram_api_key,
             vad_events=True,
+            endpointing_ms=STT_ENDPOINTING_MS,
             utterance_end_ms=STT_UTTERANCE_END_MS,
         ),
-        llm=groq.LLM(model="openai/gpt-oss-120b", api_key=settings.groq_api_key),
+        llm=groq.LLM(model=GROQ_LLM_MODEL, api_key=settings.groq_api_key),
         tts=cartesia.TTS(api_key=settings.cartesia_api_key),
         vad=None,
         turn_handling=TurnHandlingOptions(

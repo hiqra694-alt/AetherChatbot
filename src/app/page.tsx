@@ -7,6 +7,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import CanvasWorkspace from '@/components/CanvasWorkspace'
 import VoiceModal from '@/components/VoiceModal'
+import AetherLogo from '@/components/AetherLogo'
 import {
   Plus,
   Mic,
@@ -17,7 +18,6 @@ import {
   X,
   Send,
   Bot,
-  User,
   Copy,
   Check,
   Brain,
@@ -686,6 +686,11 @@ export default function Dashboard() {
     setIsStreaming(false)
     setAttachedFile(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
+    // Canvas is per-turn, opened explicitly from a document card -- it must
+    // never carry over a previous session's open panel/document onto this
+    // one, even if this session also has its own canvas documents in history.
+    setCanvasOpen(false)
+    setCanvasDoc({ title: 'Untitled Canvas Document', content: '' })
     await fetchMessages(sessionId)
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
@@ -701,6 +706,10 @@ export default function Dashboard() {
     setAttachedFile(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
     setProviderDropdownOpen(false)  // always close any open dropdown
+    // A fresh chat must always start with the canvas closed -- see the same
+    // reset in handleSelectSession.
+    setCanvasOpen(false)
+    setCanvasDoc({ title: 'Untitled Canvas Document', content: '' })
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
     }
@@ -1218,9 +1227,12 @@ export default function Dashboard() {
                     title: deriveCanvasTitle(canvasParsed.canvasContent),
                     content: canvasParsed.canvasContent,
                   }
-                  // Idempotent -- React bails out on an identical boolean, so
-                  // calling this on every chunk once the tag is open is safe.
-                  setCanvasOpen(true)
+                  // Deliberately does NOT open the canvas here -- the panel
+                  // must only open once generation completes (below) or when
+                  // the user explicitly clicks a document card's "Open in
+                  // Canvas" button, never just because a <canvas> tag started
+                  // streaming in. canvasDoc is still kept live-synced so it's
+                  // already up to date by the time either of those happens.
                   const now = Date.now()
                   if (lastCanvasFlush === 0 || now - lastCanvasFlush >= CANVAS_STREAM_FLUSH_INTERVAL_MS) {
                     lastCanvasFlush = now
@@ -1373,16 +1385,247 @@ export default function Dashboard() {
     }
   }
 
-  const handleQuickPrompt = (promptText: string) => {
-    setInputText(promptText)
-    setTimeout(() => textareaRef.current?.focus(), 50)
-  }
-
   const activeProvider = PROVIDERS.find(p => p.id === selectedProvider) || PROVIDERS[0]
   const ActiveProviderIcon = activeProvider.icon
   // Chat bubbles/input can use the extra reclaimed width once the sidebar is
   // collapsed, but only on large screens where it won't feel overstretched.
   const chatMaxWidth = sidebarOpen ? 'max-w-3xl' : 'max-w-3xl lg:max-w-4xl'
+
+  // The message-composer form itself -- identical markup/handlers whether it
+  // renders centered under the Gemini-style welcome hero (no messages yet)
+  // or pinned in the footer once the thread has messages (see the ternary in
+  // the Chat Thread section and the footer below). Defined once here so both
+  // render sites share the exact same submit handler, dropdown, attachment
+  // button, voice trigger, and textarea -- nothing about the form's own
+  // behavior differs between the two positions, only where it's mounted.
+  const chatInputForm = (
+    <form onSubmit={handleSendMessage} className="relative flex flex-col gap-2 bg-white dark:bg-slate-900/80 backdrop-blur-md border-2 border-purple-500/80 focus-within:border-purple-500 focus-within:ring-2 focus-within:ring-purple-500/20 rounded-2xl p-2 transition-all shadow-sm">
+      {/* Hidden file input, restricted to PDFs, triggered by the "Attach PDF" menu item */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/pdf"
+        onChange={handleFileSelected}
+        className="hidden"
+      />
+
+      {/* Attachment Indicator - shown above the input row once a PDF is selected */}
+      {attachedFile && (
+        <div className="flex items-center gap-2 px-1">
+          <div className="flex items-center gap-2 bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800/50 rounded-full pl-2.5 pr-1.5 py-1 text-xs font-medium text-violet-700 dark:text-violet-300 max-w-full">
+            <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+            <span className="truncate max-w-[220px]">{attachedFile.name}</span>
+            <button
+              type="button"
+              onClick={handleRemoveAttachment}
+              className="p-0.5 rounded-full hover:bg-violet-200/60 dark:hover:bg-violet-800/40 text-violet-500 dark:text-violet-400 transition-colors cursor-pointer"
+              title="Remove attachment"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-end gap-2">
+        <div className="relative flex-shrink-0 self-end mb-0.5 ml-1">
+          <button
+            type="button"
+            onClick={() => setPlusMenuOpen(!plusMenuOpen)}
+            disabled={isStreaming}
+            className={`p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent ${attachedFile ? 'text-violet-500 bg-violet-50 dark:bg-violet-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+            title="Attachments & Tools"
+          >
+            <Plus className="w-5 h-5" />
+          </button>
+
+          {plusMenuOpen && (
+            <>
+              <div className="fixed inset-0 z-20 cursor-default" onClick={() => setPlusMenuOpen(false)} />
+              <div className="absolute left-0 bottom-full mb-2 w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-2 animate-fade-in">
+                <button
+                  type="button"
+                  onClick={handleAttachButtonClick}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left cursor-pointer ${attachedFile ? 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Paperclip className="w-4 h-4" />
+                    <span>Attach PDF</span>
+                  </div>
+                  {attachedFile && <Check className="w-4 h-4" />}
+                </button>
+
+                <div className="mt-1.5 pt-1.5 border-t border-slate-100 dark:border-slate-800">
+                  <div className="px-3 py-1 text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                    Connectors
+                  </div>
+                  {CONNECTORS.map(connector => {
+                    const Icon = connector.icon
+                    const isOn = enabledConnectors.includes(connector.id)
+                    // Reflects the persistent identity link (see
+                    // linkedProviders), not just whether a live
+                    // access token happens to be cached this
+                    // session. Only used for the tooltip here -- no
+                    // persistent badge text, to keep the row minimal.
+                    const isConnected = linkedProviders[connector.provider]
+                    return (
+                      // A <div role="button"> rather than a real
+                      // <button> here -- the subtle Disconnect
+                      // icon-button below needs to live inside this
+                      // row, and a <button> nested inside another
+                      // <button> is invalid HTML (browsers auto-close
+                      // the outer one early, breaking the layout and
+                      // click handling both).
+                      <div
+                        key={connector.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => toggleConnector(connector.id, connector.provider)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            toggleConnector(connector.id, connector.provider)
+                          }
+                        }}
+                        title={isConnected ? `${connector.label} is linked -- toggle to use it this turn` : `Click to link ${connector.label}`}
+                        className="w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium text-left transition-all cursor-pointer text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Icon className="w-4 h-4" />
+                          <span>{connector.label}</span>
+                          {isConnected && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                handleDisconnectConnector(connector.provider)
+                              }}
+                              title={`Disconnect ${connector.label}`}
+                              className="p-0.5 rounded text-slate-300 hover:text-rose-500 dark:text-slate-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
+                            >
+                              <Unlink className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                        <div
+                          className={`w-9 h-5 rounded-full transition-colors flex-shrink-0 ${isOn ? 'bg-gradient-to-r from-violet-600 to-cyan-500' : 'bg-slate-200 dark:bg-slate-700'}`}
+                        >
+                          <div
+                            className={`w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform mt-0.5 ${isOn ? 'translate-x-4' : 'translate-x-0.5'}`}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={inputText}
+          onChange={(e) => setInputText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              handleSendMessage(e)
+            }
+          }}
+          disabled={isStreaming}
+          placeholder={isStreaming ? "Awaiting assistant response..." : `Message ${activeProvider.name}...`}
+          className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
+        />
+
+        {/* Model Selector Dropdown - Re-located inside input container, on the right side */}
+        <div className="relative flex-shrink-0 self-end mb-0.5">
+          <button
+            type="button"
+            onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
+          >
+            <ActiveProviderIcon className="w-4 h-4" />
+            <span className="hidden sm:inline">{activeProvider.name}</span>
+            <ChevronDown className="w-3.5 h-3.5 opacity-60" />
+          </button>
+
+          {providerDropdownOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-20 cursor-default"
+                onClick={() => setProviderDropdownOpen(false)}
+              />
+
+              <div className="absolute right-0 bottom-full mb-2 w-56 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
+                <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-800 mb-1">
+                  Select Brain Engine
+                </div>
+                {PROVIDERS.map(p => {
+                  const Icon = p.icon
+                  const isSelected = p.id === selectedProvider
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedProvider(p.id)
+                        setProviderDropdownOpen(false)
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
+                          ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white font-bold'
+                          : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                        }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : p.id === 'groq' ? 'text-blue-500' : 'text-slate-500'
+                          }`} />
+                        <span>{p.name}</span>
+                      </div>
+                      {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={handleVoiceButtonClick}
+          title="Voice Mode"
+          className="p-2.5 rounded-xl text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors cursor-pointer flex-shrink-0 self-end mb-0.5"
+        >
+          <Mic className="w-5 h-5 drop-shadow-[0_0_8px_rgba(147,51,234,0.7)] animate-pulse" />
+        </button>
+
+        <button
+          type="submit"
+          disabled={(!inputText.trim() && !attachedFile) || isStreaming}
+          className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
+        >
+          <Send className="w-4 h-4" />
+        </button>
+      </div>
+    </form>
+  )
+
+  // Shared wrapper around chatInputForm -- the permanent purple border lives
+  // on the form itself (so it's identical either way), but the ambient glow
+  // aura is a separate absolutely-positioned layer behind it. Reused as-is
+  // for both the centered welcome placement and the pinned footer placement
+  // below so the two are pixel-identical in width, border, and glow, not
+  // just visually similar.
+  const chatInputBar = (
+    <div className="relative w-full">
+      <div className="absolute -inset-2 bg-gradient-to-r from-purple-500/15 to-purple-500/15 blur-2xl rounded-full pointer-events-none" />
+      <div className="relative">
+        {chatInputForm}
+      </div>
+    </div>
+  )
 
   return (
     <main className="flex h-screen w-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-200 overflow-hidden font-sans">
@@ -1394,11 +1637,9 @@ export default function Dashboard() {
         {/* Sidebar Header */}
         <div className="p-4 border-b border-slate-200 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 bg-gradient-to-tr from-violet-600 to-cyan-500 rounded-lg flex items-center justify-center shadow-md">
-              <Bot className="w-5 h-5 text-white" />
-            </div>
+            <AetherLogo size={36} />
             <div>
-              <h2 className="font-bold text-base tracking-tight text-slate-800 dark:text-slate-100">AetherChat</h2>
+              <h2 className="font-bold text-base tracking-tight text-slate-800 dark:text-slate-100">Aether</h2>
               <span className="text-[10px] text-transparent bg-clip-text bg-gradient-to-r from-violet-600 to-indigo-500 font-bold uppercase tracking-wider">Agentic Workspace</span>
             </div>
           </div>
@@ -1697,9 +1938,14 @@ export default function Dashboard() {
           </button>
         )}
 
-        {/* Canvas toggle (Phase 2) -- opens/closes the split-pane TipTap
-            document panel to the right of the chat thread. Placed just left
-            of the bell, same floating circular treatment.
+        {/* Canvas toggle (Phase 2) -- re-opens/closes the split-pane TipTap
+            document panel for whichever document is already loaded into
+            canvasDoc. Only rendered once a document actually exists in
+            context (i.e. some card's "Open in Canvas" has been clicked, or a
+            generation just completed) -- it must never be able to open a
+            blank canvas on its own, only reopen one that a document already
+            populated. Placed just left of the bell, same floating circular
+            treatment.
 
             `absolute` (not `fixed`) is deliberate: this section is already
             `relative`, and CanvasWorkspace mounts as its flex sibling, so
@@ -1708,14 +1954,16 @@ export default function Dashboard() {
             here (rather than the viewport) means `right-16` always lands in
             the remaining chat space with zero overlap, at any viewport
             width or sidebar state, with no hardcoded panel-width guess. */}
-        <button
-          type="button"
-          onClick={() => setCanvasOpen(prev => !prev)}
-          className="absolute top-4 right-16 z-50 p-2 rounded-full border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 transition-all cursor-pointer"
-          title={canvasOpen ? 'Close canvas' : 'Open canvas'}
-        >
-          {canvasOpen ? <PanelRightClose className="w-5 h-5" /> : <PanelRightOpen className="w-5 h-5" />}
-        </button>
+        {canvasDoc.content.trim().length > 0 && (
+          <button
+            type="button"
+            onClick={() => setCanvasOpen(prev => !prev)}
+            className="absolute top-4 right-16 z-50 p-2 rounded-full border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm hover:shadow-md text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 transition-all cursor-pointer"
+            title={canvasOpen ? 'Close canvas' : 'Open canvas'}
+          >
+            {canvasOpen ? <PanelRightClose className="w-5 h-5" /> : <PanelRightOpen className="w-5 h-5" />}
+          </button>
+        )}
 
         {/* Floating Notification Bell -- anchored to this section (see the
             canvas toggle above for why `absolute` replaces `fixed` here),
@@ -1801,44 +2049,36 @@ export default function Dashboard() {
               <span className="text-xs text-slate-400">Loading history...</span>
             </div>
           ) : messages.length === 0 && !isStreaming ? (
-            /* Welcome / Empty Page State */
-            <div className="flex flex-col items-center justify-center h-full max-w-xl mx-auto text-center space-y-8 animate-fade-in py-10">
-              <div className="w-16 h-16 bg-gradient-to-tr from-violet-600 to-cyan-500 rounded-2xl flex items-center justify-center shadow-lg shadow-violet-500/10">
-                <Bot className="w-10 h-10 text-white" />
-              </div>
-              <div>
+            /* Welcome / Empty Page State -- Gemini-style centered hero with
+               the composer directly underneath it, rather than pinned to the
+               bottom of the screen (see the footer below, which only takes
+               over once the thread actually has messages). The outer column
+               shares chatMaxWidth with the footer below so chatInputBar
+               renders at the exact same width in both places -- the heading
+               text itself stays narrower (max-w-xl) for readability, nested
+               inside. */
+            <div className={`flex flex-col items-center justify-center min-h-[70vh] w-full ${chatMaxWidth} mx-auto text-center space-y-8 animate-fade-in px-4`}>
+              <AetherLogo size={80} />
+              <div className="max-w-xl mx-auto">
                 <h1 className="text-3xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-slate-900 via-slate-700 to-slate-500 dark:from-slate-100 dark:via-slate-300 dark:to-slate-500">
-                  Welcome to AetherChat
+                  Welcome to Aether
                 </h1>
                 <p className="text-sm text-slate-500 mt-2.5 max-w-md mx-auto leading-relaxed font-medium">
                   Deploy autonomous tools, schedule background tasks, and orchestrate advanced agentic workflows in real-time.
                 </p>
               </div>
 
-              {/* Quick suggestion prompt cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full mt-4">
-                <button
-                  onClick={() => handleQuickPrompt("Write a clean, documented Python function to calculate Fibonacci sequences.")}
-                  className="p-4 bg-white dark:bg-slate-900/40 hover:bg-slate-50 dark:hover:bg-slate-900/80 border border-slate-205 dark:border-slate-800/80 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-violet-500/30 group cursor-pointer shadow-sm"
-                >
-                  <span className="block text-xs font-bold text-slate-700 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white">Write Python Code</span>
-                  <span className="block text-[11px] text-slate-400 mt-1">Generate a documented Fibonacci algorithm.</span>
-                </button>
-                <button
-                  onClick={() => handleQuickPrompt("Explain quantum physics principles in three simple bullet points.")}
-                  className="p-4 bg-white dark:bg-slate-900/40 hover:bg-slate-50 dark:hover:bg-slate-900/80 border border-slate-205 dark:border-slate-800/80 rounded-2xl text-left transition-all hover:scale-[1.01] hover:border-cyan-500/30 group cursor-pointer shadow-sm"
-                >
-                  <span className="block text-xs font-bold text-slate-700 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white">Explain Physics Concepts</span>
-                  <span className="block text-[11px] text-slate-400 mt-1">Summarize quantum principles cleanly.</span>
-                </button>
-              </div>
+              {/* Composer, centered directly beneath the welcome text -- the
+                  exact same chatInputBar (chatInputForm + permanent purple
+                  border + glow) the footer renders once the thread has
+                  messages, at the exact same width. */}
+              {chatInputBar}
             </div>
           ) : (
             /* Chat Messages List */
             <div className={`${chatMaxWidth} mx-auto space-y-6 transition-all duration-300`}>
               {messages.map((message) => {
                 const isUser = message.role === 'user'
-                const MsgIcon = isUser ? User : Bot
                 const providerObj = PROVIDERS.find(p => p.id === message.provider_used)
                 const uploadMarkerMatch = isUser ? message.content?.match(/^\[Uploaded document: (.+)\]$/) : null
 
@@ -1871,10 +2111,8 @@ export default function Dashboard() {
                     ) : (
                       /* AI MESSAGE: Clean text with bot logo */
                       <div className="flex gap-4 max-w-[95%] sm:max-w-[90%] w-full">
-                        {/* AetherChat Logo Avatar */}
-                        <div className="w-8 h-8 flex-shrink-0 rounded-xl bg-gradient-to-tr from-violet-600 to-cyan-500 flex items-center justify-center shadow-md mt-1">
-                          <Bot className="w-5 h-5 text-white" />
-                        </div>
+                        {/* Aether Logo Avatar */}
+                        <AetherLogo className="w-8 h-8 mt-1" />
                         <div className="flex flex-col w-full min-w-0">
                           {/* Researched Indicator */}
                           {message.sources && message.sources.length > 0 && (
@@ -1902,7 +2140,7 @@ export default function Dashboard() {
                                   </ReactMarkdown>
                                 </div>
                               )}
-                              <div className="group flex items-center gap-3 px-4 py-3 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 hover:border-violet-300 dark:hover:border-violet-600 transition-all w-full sm:w-auto sm:max-w-sm">
+                              <div className="group flex items-center gap-3 px-4 py-3 rounded-xl border border-violet-500/80 dark:border-violet-500/80 shadow-sm bg-slate-50/80 dark:bg-slate-800/40 hover:border-violet-600 dark:hover:border-violet-400 transition-all w-full sm:w-auto sm:max-w-sm">
                                 <div className="w-9 h-9 flex-shrink-0 rounded-lg bg-gradient-to-tr from-violet-600 to-cyan-500 flex items-center justify-center shadow-sm">
                                   <FileText className="w-4.5 h-4.5 text-white" />
                                 </div>
@@ -1926,7 +2164,7 @@ export default function Dashboard() {
                                   }}
                                   title={`Open "${message.canvasDocument.title}" in Canvas`}
                                   aria-label={`Open "${message.canvasDocument.title}" in Canvas`}
-                                  className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors cursor-pointer"
+                                  className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold rounded-lg border border-zinc-900 dark:border-white/20 bg-violet-600 text-white hover:bg-violet-700 transition-colors cursor-pointer"
                                 >
                                   <ExternalLink className="w-3.5 h-3.5" />
                                   <span>Open in Canvas</span>
@@ -1999,225 +2237,23 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Input Text Form Area */}
-        <footer className="p-4 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent dark:from-slate-950 dark:via-slate-950 border-t border-slate-200/60 dark:border-slate-900 relative z-10">
-          <div className={`${chatMaxWidth} mx-auto transition-all duration-300`}>
-            <form onSubmit={handleSendMessage} className="relative flex flex-col gap-2 bg-white dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/80 dark:border-slate-800 focus-within:border-violet-400 dark:focus-within:border-slate-700/80 focus-within:ring-2 focus-within:ring-violet-500/5 dark:focus-within:ring-0 rounded-2xl p-2 transition-all shadow-sm">
-              {/* Hidden file input, restricted to PDFs, triggered by the "Attach PDF" menu item */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/pdf"
-                onChange={handleFileSelected}
-                className="hidden"
-              />
-
-              {/* Attachment Indicator - shown above the input row once a PDF is selected */}
-              {attachedFile && (
-                <div className="flex items-center gap-2 px-1">
-                  <div className="flex items-center gap-2 bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800/50 rounded-full pl-2.5 pr-1.5 py-1 text-xs font-medium text-violet-700 dark:text-violet-300 max-w-full">
-                    <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                    <span className="truncate max-w-[220px]">{attachedFile.name}</span>
-                    <button
-                      type="button"
-                      onClick={handleRemoveAttachment}
-                      className="p-0.5 rounded-full hover:bg-violet-200/60 dark:hover:bg-violet-800/40 text-violet-500 dark:text-violet-400 transition-colors cursor-pointer"
-                      title="Remove attachment"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div className="flex items-end gap-2">
-                <div className="relative flex-shrink-0 self-end mb-0.5 ml-1">
-                  <button
-                    type="button"
-                    onClick={() => setPlusMenuOpen(!plusMenuOpen)}
-                    disabled={isStreaming}
-                    className={`p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent ${attachedFile ? 'text-violet-500 bg-violet-50 dark:bg-violet-900/20' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
-                    title="Attachments & Tools"
-                  >
-                    <Plus className="w-5 h-5" />
-                  </button>
-
-                  {plusMenuOpen && (
-                    <>
-                      <div className="fixed inset-0 z-20 cursor-default" onClick={() => setPlusMenuOpen(false)} />
-                      <div className="absolute left-0 bottom-full mb-2 w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-2 animate-fade-in">
-                        <button
-                          type="button"
-                          onClick={handleAttachButtonClick}
-                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-left cursor-pointer ${attachedFile ? 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <Paperclip className="w-4 h-4" />
-                            <span>Attach PDF</span>
-                          </div>
-                          {attachedFile && <Check className="w-4 h-4" />}
-                        </button>
-
-                        <div className="mt-1.5 pt-1.5 border-t border-slate-100 dark:border-slate-800">
-                          <div className="px-3 py-1 text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                            Connectors
-                          </div>
-                          {CONNECTORS.map(connector => {
-                            const Icon = connector.icon
-                            const isOn = enabledConnectors.includes(connector.id)
-                            // Reflects the persistent identity link (see
-                            // linkedProviders), not just whether a live
-                            // access token happens to be cached this
-                            // session. Only used for the tooltip here -- no
-                            // persistent badge text, to keep the row minimal.
-                            const isConnected = linkedProviders[connector.provider]
-                            return (
-                              // A <div role="button"> rather than a real
-                              // <button> here -- the subtle Disconnect
-                              // icon-button below needs to live inside this
-                              // row, and a <button> nested inside another
-                              // <button> is invalid HTML (browsers auto-close
-                              // the outer one early, breaking the layout and
-                              // click handling both).
-                              <div
-                                key={connector.id}
-                                role="button"
-                                tabIndex={0}
-                                onClick={() => toggleConnector(connector.id, connector.provider)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter' || e.key === ' ') {
-                                    e.preventDefault()
-                                    toggleConnector(connector.id, connector.provider)
-                                  }
-                                }}
-                                title={isConnected ? `${connector.label} is linked -- toggle to use it this turn` : `Click to link ${connector.label}`}
-                                className="w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium text-left transition-all cursor-pointer text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <Icon className="w-4 h-4" />
-                                  <span>{connector.label}</span>
-                                  {isConnected && (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation()
-                                        handleDisconnectConnector(connector.provider)
-                                      }}
-                                      title={`Disconnect ${connector.label}`}
-                                      className="p-0.5 rounded text-slate-300 hover:text-rose-500 dark:text-slate-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
-                                    >
-                                      <Unlink className="w-3 h-3" />
-                                    </button>
-                                  )}
-                                </div>
-                                <div
-                                  className={`w-9 h-5 rounded-full transition-colors flex-shrink-0 ${isOn ? 'bg-gradient-to-r from-violet-600 to-cyan-500' : 'bg-slate-200 dark:bg-slate-700'}`}
-                                >
-                                  <div
-                                    className={`w-4 h-4 bg-white rounded-full shadow-sm transform transition-transform mt-0.5 ${isOn ? 'translate-x-4' : 'translate-x-0.5'}`}
-                                  />
-                                </div>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-
-                <textarea
-                  ref={textareaRef}
-                  rows={1}
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      handleSendMessage(e)
-                    }
-                  }}
-                  disabled={isStreaming}
-                  placeholder={isStreaming ? "Awaiting assistant response..." : `Message ${activeProvider.name}...`}
-                  className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
-                />
-
-                {/* Model Selector Dropdown - Re-located inside input container, on the right side */}
-                <div className="relative flex-shrink-0 self-end mb-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
-                  >
-                    <ActiveProviderIcon className="w-4 h-4" />
-                    <span className="hidden sm:inline">{activeProvider.name}</span>
-                    <ChevronDown className="w-3.5 h-3.5 opacity-60" />
-                  </button>
-
-                  {providerDropdownOpen && (
-                    <>
-                      <div
-                        className="fixed inset-0 z-20 cursor-default"
-                        onClick={() => setProviderDropdownOpen(false)}
-                      />
-
-                      <div className="absolute right-0 bottom-full mb-2 w-56 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg z-30 p-1.5 animate-fade-in">
-                        <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-800 mb-1">
-                          Select Brain Engine
-                        </div>
-                        {PROVIDERS.map(p => {
-                          const Icon = p.icon
-                          const isSelected = p.id === selectedProvider
-                          return (
-                            <button
-                              key={p.id}
-                              type="button"
-                              onClick={() => {
-                                setSelectedProvider(p.id)
-                                setProviderDropdownOpen(false)
-                              }}
-                              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all text-left cursor-pointer ${isSelected
-                                  ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white font-bold'
-                                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                                }`}
-                            >
-                              <div className="flex items-center gap-2.5">
-                                <Icon className={`w-4 h-4 ${p.id === 'gemini' ? 'text-violet-500' : p.id === 'openai' ? 'text-emerald-500' : p.id === 'claude' ? 'text-amber-500' : p.id === 'groq' ? 'text-blue-500' : 'text-slate-500'
-                                  }`} />
-                                <span>{p.name}</span>
-                              </div>
-                              {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-violet-600" />}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    </>
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleVoiceButtonClick}
-                  title="Voice Mode"
-                  className="p-2.5 rounded-xl text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors cursor-pointer flex-shrink-0 self-end mb-0.5"
-                >
-                  <Mic className="w-5 h-5 drop-shadow-[0_0_8px_rgba(147,51,234,0.7)] animate-pulse" />
-                </button>
-
-                <button
-                  type="submit"
-                  disabled={(!inputText.trim() && !attachedFile) || isStreaming}
-                  className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </div>
-            </form>
-            <p className="text-[10px] text-center text-slate-400 mt-2.5 font-medium">
-              Secure Postgres chat storage. Streaming powered by FastAPI backend.
-            </p>
-          </div>
-        </footer>
+        {/* Input Text Form Area -- once the thread has messages, the
+            composer (chatInputBar, defined above) lives here pinned to the
+            bottom as usual, at the exact same width/border/glow as the
+            centered welcome placement. While the thread is still empty, it's
+            rendered centered under the welcome hero instead (see the
+            ternary above), so this footer stays unmounted entirely rather
+            than doubling it up or showing an empty bar under the hero. */}
+        {!(messages.length === 0 && !isStreaming) && (
+          <footer className="p-4 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent dark:from-slate-950 dark:via-slate-950 border-t border-slate-200/60 dark:border-slate-900 relative z-10">
+            <div className={`w-full ${chatMaxWidth} mx-auto transition-all duration-300`}>
+              {chatInputBar}
+              <p className="text-[10px] text-center text-slate-400 mt-2.5 font-medium">
+                Secure Postgres chat storage. Streaming powered by FastAPI backend.
+              </p>
+            </div>
+          </footer>
+        )}
       </section>
 
       {/* Canvas Workspace (Phase 2) -- conditionally rendered split-pane
@@ -2497,7 +2533,7 @@ export default function Dashboard() {
               </div>
               <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-2">Sign Out</h3>
               <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-                Are you sure you want to log out of AetherChat?
+                Are you sure you want to log out of Aether?
               </p>
               <div className="flex w-full gap-3">
                 <button

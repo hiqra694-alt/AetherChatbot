@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AetherChat - Premium Multi-Provider AI Portal",
+  title: "Aether - Premium Multi-Provider AI Portal",
   description: "Secure, real-time AI conversation streaming powered by Google Gemini, OpenAI ChatGPT, and Anthropic Claude. Built with Next.js and Supabase.",
 };
 
