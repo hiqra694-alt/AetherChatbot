@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import time
@@ -68,8 +69,22 @@ def _get_reranker() -> TextCrossEncoder:
     PyTorch). The first call downloads and caches the model weights from
     Hugging Face; every call after that is pure CPU inference with no
     network round trip.
+
+    threads=1 is explicit and deliberate: fastembed only constrains
+    onnxruntime's intra_op/inter_op thread counts when a `threads` value is
+    passed (see fastembed.common.onnx_model.OnnxModel.load_onnx_model) --
+    left at its default (None), onnxruntime falls back to its own default
+    of one intra-op thread per physical core, WITH busy-spin waiting
+    enabled, for low single-inference latency. That default is fine for a
+    one-off batch job, but here it runs inline whenever a voice or chat
+    turn calls search_knowledge_base -- an uncapped, spinning thread pool
+    contending for every CPU core is exactly what starved the voice
+    worker's Silero VAD (a separate, already-capped onnxruntime session --
+    see voice/agent.py's module docstring) of CPU time and drove system-wide
+    load to ~100%. One thread keeps this rerank's own CPU footprint small
+    and non-spinning, matching Silero's own session config.
     """
-    return TextCrossEncoder(model_name=RERANK_MODEL)
+    return TextCrossEncoder(model_name=RERANK_MODEL, threads=1)
 
 
 # ==================================================
@@ -343,6 +358,52 @@ async def process_and_store_pdf(supabase: Client, file_bytes: bytes, filename: s
     return len(rows)
 
 
+def _get_relevant_context_sync(
+    supabase: Client,
+    query: str,
+    user_id: str,
+    session_id: str,
+    top_k: int,
+    document_name: Optional[str],
+) -> List[RetrievedChunk]:
+    """
+    Synchronous body of get_relevant_context -- see that function for the
+    full contract. Split out so it can run entirely off the event loop (see
+    get_relevant_context): every step here is a blocking call (a Voyage AI
+    HTTP round trip that can itself sleep up to ~110s across retries on a
+    rate limit -- see _embed_with_retry -- a synchronous Supabase RPC round
+    trip, and the local BM25 + cross-encoder rerank), and none of it
+    awaits, so run directly on an event loop thread it would stall that
+    loop for the full duration of all three calls, sequentially.
+    """
+    query_embedding = _embed_with_retry([query], input_type="query")[0]
+
+    candidate_count = min(max(top_k * CANDIDATE_MULTIPLIER, CANDIDATE_FLOOR), CANDIDATE_CEILING)
+
+    res = supabase.rpc(
+        "match_document_chunks",
+        {
+            "query_embedding": query_embedding,
+            "match_threshold": DEFAULT_MATCH_THRESHOLD,
+            "match_count": max(candidate_count, top_k),
+            "filter_user_id": user_id,
+            "filter_session_id": session_id,
+            "filter_document_name": document_name,
+        },
+    ).execute()
+
+    rows = _hybrid_rerank(query, res.data or [], top_k)
+
+    return [
+        RetrievedChunk(
+            document_name=row["document_name"],
+            chunk_text=row["chunk_text"],
+            similarity=row["similarity"],
+        )
+        for row in rows
+    ]
+
+
 async def get_relevant_context(
     supabase: Client,
     query: str,
@@ -376,7 +437,11 @@ async def get_relevant_context(
 
     Exported so backend/api/chat/services.py can call this directly to
     ground chat responses in the user's uploaded documents, without either
-    module importing internals from the other.
+    module importing internals from the other. voice/tools_adapter.py's
+    search_knowledge_base tool calls it too -- from a live LiveKit voice
+    session, where blocking the event loop doesn't just add HTTP latency,
+    it freezes the audio pipeline outright (see voice/agent.py's module
+    docstring for the incident this traces back to).
 
     Retrieval is hybrid: this RPC call over-fetches a candidate pool (rather
     than just top_k) so a downstream local BM25 + cross-encoder reranking
@@ -385,33 +450,19 @@ async def get_relevant_context(
     same CV) ahead of a chunk that merely scored well on cosine similarity.
     This still issues exactly one Supabase RPC call — only match_count
     changes — so no new round trip or schema migration is required.
+
+    The actual work (_get_relevant_context_sync) is entirely synchronous --
+    a Voyage AI embed call, a Supabase RPC call, then local BM25/cross-
+    encoder reranking -- with no internal `await` at all, so it's run via
+    the default executor rather than inline: every caller here already
+    awaits this function, so offloading it is a pure latency/isolation
+    improvement with no change to the return value or error behavior for
+    any existing caller.
     """
-    query_embedding = _embed_with_retry([query], input_type="query")[0]
-
-    candidate_count = min(max(top_k * CANDIDATE_MULTIPLIER, CANDIDATE_FLOOR), CANDIDATE_CEILING)
-
-    res = supabase.rpc(
-        "match_document_chunks",
-        {
-            "query_embedding": query_embedding,
-            "match_threshold": DEFAULT_MATCH_THRESHOLD,
-            "match_count": max(candidate_count, top_k),
-            "filter_user_id": user_id,
-            "filter_session_id": session_id,
-            "filter_document_name": document_name,
-        },
-    ).execute()
-
-    rows = _hybrid_rerank(query, res.data or [], top_k)
-
-    return [
-        RetrievedChunk(
-            document_name=row["document_name"],
-            chunk_text=row["chunk_text"],
-            similarity=row["similarity"],
-        )
-        for row in rows
-    ]
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, _get_relevant_context_sync, supabase, query, user_id, session_id, top_k, document_name
+    )
 
 
 async def list_user_documents(supabase: Client, user_id: str, session_id: str) -> List[DocumentMetadata]:

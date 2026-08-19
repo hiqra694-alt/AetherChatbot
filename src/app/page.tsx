@@ -6,8 +6,10 @@ import { createClient } from '@/utils/supabase/client'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import CanvasWorkspace from '@/components/CanvasWorkspace'
+import VoiceModal from '@/components/VoiceModal'
 import {
   Plus,
+  Mic,
   MessageSquare,
   Trash2,
   LogOut,
@@ -298,6 +300,9 @@ export default function Dashboard() {
   // memoized on it, so streaming chat tokens updating `messages` elsewhere
   // in this component never cause the (expensive) editor tree to re-render.
   const [canvasOpen, setCanvasOpen] = useState(false)
+  // Voice Mode (Phase 3) -- entirely separate from isStreaming/messages;
+  // opening/closing it never touches text chat state, see VoiceModal.tsx.
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false)
   const [canvasDoc, setCanvasDoc] = useState<{ title: string; content: string }>({
     title: 'Untitled Canvas Document',
     content: '',
@@ -702,6 +707,45 @@ export default function Dashboard() {
     setTimeout(() => textareaRef.current?.focus(), 50)
   }
 
+  // Inserts a new chat_sessions row, mirrors it into local state, and
+  // returns its id. Extracted out of handleSendMessage (where this used to
+  // be inlined) so the mic button (handleVoiceButtonClick) can create a
+  // session on demand too, without duplicating the insert logic.
+  const createNewSession = async (title: string): Promise<string> => {
+    const { data: newSession, error: sessionErr } = await supabase
+      .from('chat_sessions')
+      .insert({ title })
+      .select()
+      .single()
+
+    if (sessionErr) throw sessionErr
+    if (!newSession) throw new Error('Failed to create new session.')
+
+    setActiveSessionId(newSession.id)
+    setSessions(prev => [newSession, ...prev])
+    return newSession.id
+  }
+
+  // Mic button (Phase 4): unlike text send, there's no user-typed content to
+  // derive a title from here, and no `disabled` gate on the button itself --
+  // this is the only place that has to create a session from a bare click,
+  // so it awaits createNewSession() itself rather than relying on one
+  // already being active.
+  const handleVoiceButtonClick = async () => {
+    if (activeSessionId) {
+      setIsVoiceModalOpen(true)
+      return
+    }
+
+    try {
+      await createNewSession('Voice Chat')
+      setIsVoiceModalOpen(true)
+    } catch (err) {
+      console.error('Failed to create a session for voice mode:', err)
+      setToast({ type: 'error', message: 'Failed to start a new chat session. Please try again.' })
+    }
+  }
+
   const handleAttachButtonClick = () => {
     fileInputRef.current?.click()
     setPlusMenuOpen(false)
@@ -1065,18 +1109,7 @@ export default function Dashboard() {
         const title = messageContent
           ? (messageContent.length > 30 ? messageContent.slice(0, 30) + '...' : messageContent)
           : `📄 ${fileToSend?.name}`
-        const { data: newSession, error: sessionErr } = await supabase
-          .from('chat_sessions')
-          .insert({ title })
-          .select()
-          .single()
-
-        if (sessionErr) throw sessionErr
-        if (!newSession) throw new Error('Failed to create new session.')
-
-        currentSessionId = newSession.id
-        setActiveSessionId(currentSessionId)
-        setSessions(prev => [newSession, ...prev])
+        currentSessionId = await createNewSession(title)
       }
 
       // 2. Optimistically render the user's turn locally. The backend now
@@ -2163,6 +2196,15 @@ export default function Dashboard() {
                 </div>
 
                 <button
+                  type="button"
+                  onClick={handleVoiceButtonClick}
+                  title="Voice Mode"
+                  className="p-2.5 rounded-xl text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors cursor-pointer flex-shrink-0 self-end mb-0.5"
+                >
+                  <Mic className="w-5 h-5 drop-shadow-[0_0_8px_rgba(147,51,234,0.7)] animate-pulse" />
+                </button>
+
+                <button
                   type="submit"
                   disabled={(!inputText.trim() && !attachedFile) || isStreaming}
                   className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
@@ -2187,6 +2229,28 @@ export default function Dashboard() {
           onClose={handleCloseCanvas}
         />
       )}
+
+      {/* Voice Mode (Phase 3) -- a fixed-position overlay, so it mounts
+          independently of the chat thread/Canvas layout below it. */}
+      <VoiceModal
+        chatSessionId={activeSessionId || ''}
+        isOpen={isVoiceModalOpen && !!activeSessionId}
+        onClose={() => {
+          setIsVoiceModalOpen(false)
+          // The voice agent persists its own turns straight to Postgres
+          // (see backend/voice/agent.py's state-sync) rather than through
+          // this page's own setMessages -- so without this, a voice
+          // conversation is invisible in the text thread until a manual
+          // reload. onClose is VoiceModal's single exit hook (X button,
+          // "End Call", and LiveKitRoom's onDisconnected all funnel
+          // through it), so refetching here covers every way the modal can
+          // close. No spinner -- this should feel like the thread just
+          // updating, not a fresh load.
+          if (activeSessionId) {
+            fetchMessages(activeSessionId, false)
+          }
+        }}
+      />
 
       {/* MODALS */}
 

@@ -14,6 +14,7 @@ from core.scheduler import run_scheduler_loop
 from mcp_integration.mcp_manager import mcp_manager, get_merged_tool_schemas
 from mcp_integration.gmail_mcp_router import router as gmail_mcp_router
 from canvas.router import router as canvas_router
+from voice.router import router as voice_router
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -79,6 +80,10 @@ app.include_router(gmail_mcp_router)
 # routes, see canvas/router.py. Never touches intent_router.py or the Gmail
 # MCP files.
 app.include_router(canvas_router)
+# Voice agent (Phase 1) -- fully isolated LiveKit token-issuance route, see
+# voice/router.py. Never touches api/chat/routers.py, the RAG pipeline, or
+# any MCP connector.
+app.include_router(voice_router)
 
 if __name__ == "__main__":
     import uvicorn

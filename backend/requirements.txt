@@ -18,3 +18,8 @@ python-multipart
 rank-bm25
 fastembed
 mcp
+livekit-api==1.2.0
+livekit-plugins-groq==1.6.10
+livekit-plugins-deepgram==1.6.10
+livekit-plugins-cartesia==1.6.10
+psutil==7.2.2

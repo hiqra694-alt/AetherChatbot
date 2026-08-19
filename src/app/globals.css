@@ -56,6 +56,112 @@ body {
   animation: fadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+/* VoiceOrb (VoiceModal.tsx) -- independent slow rotations for the inner
+   light filaments, a gentle breathing scale on the sphere body, an opacity
+   drift on the outer bloom, an amplitude-style pulse swapped in while the
+   agent is speaking, and a radiating ring pulse for the mic button while
+   listening. Durations are the *base* values; VoiceOrb scales them per
+   state via an inline `animationDuration` override. */
+@keyframes orb-orbit-a {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes orb-orbit-b {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(-360deg); }
+}
+
+@keyframes orb-orbit-c {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes orb-orbit-d {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(-360deg); }
+}
+
+.animate-orb-orbit-a { animation: orb-orbit-a 18s linear infinite; }
+.animate-orb-orbit-b { animation: orb-orbit-b 26s linear infinite; }
+.animate-orb-orbit-c { animation: orb-orbit-c 34s linear infinite; }
+.animate-orb-orbit-d { animation: orb-orbit-d 22s linear infinite; }
+
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+
+.animate-orb-breathe {
+  animation: orb-breathe 6s ease-in-out infinite;
+}
+
+/* Endpoints come from --bloom-min/--bloom-max (set inline per state) rather
+   than a fixed opacity, so the same drift shape works whether the bloom is
+   dim (connecting) or bright (listening). */
+@keyframes orb-bloom-drift {
+  0%, 100% { opacity: var(--bloom-min, 0.3); }
+  50% { opacity: var(--bloom-max, 0.45); }
+}
+
+.animate-orb-bloom-drift {
+  animation: orb-bloom-drift 8s ease-in-out infinite;
+}
+
+/* Stand-in for real audio-amplitude analysis (out of scope for a
+   visual-only pass) -- an irregular, fast scale pulse to read as
+   "reacting to speech" while the agent is speaking. */
+@keyframes orb-bloom-amplitude {
+  0% { transform: scale(1); }
+  20% { transform: scale(1.08); }
+  35% { transform: scale(0.97); }
+  55% { transform: scale(1.12); }
+  70% { transform: scale(1.02); }
+  85% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+.animate-orb-bloom-amplitude {
+  animation: orb-bloom-amplitude 1.3s ease-in-out infinite;
+}
+
+@keyframes orb-ring-pulse {
+  0% { transform: scale(1); opacity: 0.55; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+.animate-orb-ring-pulse {
+  animation: orb-ring-pulse 1.8s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-orb-orbit-a,
+  .animate-orb-orbit-b,
+  .animate-orb-orbit-c,
+  .animate-orb-orbit-d,
+  .animate-orb-breathe,
+  .animate-orb-bloom-drift,
+  .animate-orb-bloom-amplitude,
+  .animate-orb-ring-pulse {
+    animation: none;
+  }
+}
+
+/* Toggled by VoiceModal.tsx on document.visibilitychange -- the orb's
+   rotating/blurred/blended layers cost real CPU/GPU to keep compositing
+   every frame (see VoiceOrb's comment in VoiceModal.tsx), which is wasted
+   while the tab is backgrounded and nobody can see it. */
+.voice-orb-paused .animate-orb-orbit-a,
+.voice-orb-paused .animate-orb-orbit-b,
+.voice-orb-paused .animate-orb-orbit-c,
+.voice-orb-paused .animate-orb-orbit-d,
+.voice-orb-paused .animate-orb-breathe,
+.voice-orb-paused .animate-orb-bloom-drift,
+.voice-orb-paused .animate-orb-bloom-amplitude,
+.voice-orb-paused .animate-orb-ring-pulse {
+  animation-play-state: paused;
+}
+
 /* CanvasWorkspace (TipTap) editor content -- no @tailwindcss/typography
    plugin installed, so headings/lists/marks are styled directly here
    instead of via `prose` utility classes. */

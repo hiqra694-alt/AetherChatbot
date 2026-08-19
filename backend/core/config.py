@@ -14,6 +14,16 @@ class Settings(BaseSettings):
     groq_api_key: str = Field("", validation_alias=AliasChoices("groq_api_key", "GROQ_API_KEY"))
     voyage_api_key: str = Field("", validation_alias=AliasChoices("voyage_api_key", "VOYAGE_API_KEY"))
 
+    # Voice agent (Phase 2, voice/agent.py): STT/TTS credentials for the
+    # Deepgram and Cartesia LiveKit plugins. Passed explicitly into
+    # deepgram.STT(api_key=...)/cartesia.TTS(api_key=...) rather than left
+    # for those plugins to fall back to reading os.environ directly --
+    # nothing in this app ever populates os.environ from .env (pydantic-settings
+    # parses .env into this model only), so an implicit os.environ fallback
+    # would silently see nothing no matter what's set in .env.
+    deepgram_api_key: str = Field("", validation_alias=AliasChoices("deepgram_api_key", "DEEPGRAM_API_KEY"))
+    cartesia_api_key: str = Field("", validation_alias=AliasChoices("cartesia_api_key", "CARTESIA_API_KEY"))
+
     supabase_url: str = Field("", validation_alias=AliasChoices("supabase_url", "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"))
     supabase_anon_key: str = Field("", validation_alias=AliasChoices("supabase_anon_key", "SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY"))
 
@@ -122,6 +132,14 @@ class Settings(BaseSettings):
     canvas_drive_dev_mode: bool = Field(
         False, validation_alias=AliasChoices("canvas_drive_dev_mode", "CANVAS_DRIVE_DEV_MODE")
     )
+
+    # Voice agent (Phase 1, voice/router.py): LiveKit room/token issuance for
+    # the realtime voice pipeline. All three must be set for
+    # POST /api/voice/token to work; missing config is caught inside the
+    # endpoint and surfaced as a 500 rather than failing app startup.
+    livekit_url: str = Field("", validation_alias=AliasChoices("livekit_url", "LIVEKIT_URL"))
+    livekit_api_key: str = Field("", validation_alias=AliasChoices("livekit_api_key", "LIVEKIT_API_KEY"))
+    livekit_api_secret: str = Field("", validation_alias=AliasChoices("livekit_api_secret", "LIVEKIT_API_SECRET"))
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
