@@ -1,14 +1,14 @@
-fastapi==0.111.0
-uvicorn==0.30.1
+fastapi>=0.111.0
+uvicorn>=0.30.1
 google-generativeai>=0.7.2
 openai>=2.0.0
 anthropic==0.29.0
 supabase
-python-dotenv==1.0.1
-pytest==8.2.2
-pytest-asyncio==0.23.7
+python-dotenv>=1.0.1
+pytest>=8.2.2
+pytest-asyncio>=0.23.7
 httpx
-pydantic==2.7.4
+pydantic>=2.11.0
 pydantic-settings
 beautifulsoup4
 tzdata
@@ -23,4 +23,4 @@ livekit-agents==1.6.10
 livekit-plugins-groq==1.6.10
 livekit-plugins-deepgram==1.6.10
 livekit-plugins-cartesia==1.6.10
-psutil==7.2.2
+psutil>=7.2.2
