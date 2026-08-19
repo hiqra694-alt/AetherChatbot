@@ -17,7 +17,7 @@ voyageai
 python-multipart
 rank-bm25
 fastembed
-mcp<2.0.0
+mcp==1.29.0
 livekit-api==1.2.0
 livekit-agents==1.6.10
 livekit-plugins-groq==1.6.10
