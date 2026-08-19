@@ -9,7 +9,7 @@ pytest==8.2.2
 pytest-asyncio==0.23.7
 httpx
 pydantic==2.7.4
-pydantic-settings==2.3.4
+pydantic-settings
 beautifulsoup4
 tzdata
 PyMuPDF
