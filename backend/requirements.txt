@@ -1,3 +1,12 @@
+# FastAPI backend deps (Vercel serverless deployment -- see vercel.json).
+# The voice worker (voice/agent.py) deploys separately to LiveKit Cloud and
+# installs requirements-worker.txt instead, which layers its own
+# LiveKit-specific packages on top of this same file -- see that file's
+# header comment. Keep the two in sync: an import shared by both entry
+# points (main.py and voice/agent.py) belongs here; anything only
+# voice/agent.py's process needs (livekit-agents/plugins, psutil for its
+# process-load calculator) belongs in requirements-worker.txt instead, so it
+# never inflates the Vercel function bundle.
 fastapi>=0.111.0
 uvicorn>=0.30.1
 google-generativeai>=0.7.2
@@ -19,8 +28,4 @@ rank-bm25
 fastembed
 mcp==1.29.0
 livekit-api==1.2.0
-livekit-agents==1.6.10
-livekit-plugins-groq==1.6.10
-livekit-plugins-deepgram==1.6.10
-livekit-plugins-cartesia==1.6.10
-psutil>=7.2.2
+livekit-agents

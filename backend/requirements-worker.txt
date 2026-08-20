@@ -1,0 +1,24 @@
+# Voice agent worker deps (LiveKit Cloud deployment target).
+#
+# Install with `pip install -r requirements-worker.txt` from this directory
+# (backend/) -- voice/agent.py's imports are all absolute from this package
+# root (e.g. `from core.config import get_settings`, `from api.chat.tools
+# import ...`), so this must stay the working/install directory on LiveKit
+# Cloud too, same as it is for the FastAPI app.
+#
+# `-r requirements.txt` pulls in everything voice/agent.py shares with
+# main.py (supabase, mcp, fastembed/PyMuPDF/voyageai/rank-bm25 for
+# VoiceTools.search_knowledge_base, pydantic-settings for core.config,
+# etc.) -- see that file's header comment for the split rationale. FastAPI
+# itself (fastapi/uvicorn/python-multipart) rides along unused here, but
+# LiveKit Cloud's build isn't size-constrained the way a Vercel serverless
+# function bundle is, so that's a non-issue; the packages below are the
+# ones that matter (and are deliberately excluded from requirements.txt so
+# they never ship to Vercel).
+-r requirements.txt
+
+livekit-agents==1.6.10
+livekit-plugins-groq==1.6.10
+livekit-plugins-deepgram==1.6.10
+livekit-plugins-cartesia==1.6.10
+psutil>=7.2.2
