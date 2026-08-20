@@ -170,11 +170,19 @@ STT_UTTERANCE_END_MS = 1000
 # limit on this account/model tier, surfacing as repeated 429 RateLimitError
 # retries (visible as exponential-backoff stalls mid-turn -- the opposite of
 # the low-latency turn-taking this worker is tuned for elsewhere in this
-# file). llama-3.1-8b-instant is Groq's fastest-inference production model
-# (see livekit.plugins.groq.models.LLMModels) and comfortably fits within
-# an 8,000 TPM budget for a conversational turn -- swapping to it fixes the
-# rate limit and cuts LLM time-to-first-token, both at once.
-GROQ_LLM_MODEL = "llama-3.1-8b-instant"
+# file). llama-3.1-8b-instant was Groq's fastest-inference production model
+# at the time and comfortably fit within an 8,000 TPM budget for a
+# conversational turn.
+#
+# Groq has since deprecated and removed llama-3.1-8b-instant entirely
+# (production logs show the plugin's APIStatusError: 404 model_not_found --
+# it 404s on every request, crashing the LLM inference task before any
+# audio is synthesized). llama3-8b-8192 is Groq's current small/fast 8B
+# model and the closest replacement along the same axis (low latency, low
+# token cost, comfortably fits the same TPM budget) -- see
+# https://console.groq.com/docs/models for the current supported list,
+# since Groq has repeatedly deprecated models on short notice here.
+GROQ_LLM_MODEL = "llama3-8b-8192"
 
 # Dedicated thread pool for this module's own blocking, off-loop Supabase
 # work (chat-history fetch + turn persistence) -- deliberately NOT asyncio's
