@@ -6,7 +6,9 @@ import {
   RoomAudioRenderer,
   useVoiceAssistant,
   useLocalParticipant,
+  useConnectionState,
 } from '@livekit/components-react'
+import { ConnectionState } from 'livekit-client'
 import '@livekit/components-styles'
 import { X, Loader2, PhoneOff, AlertTriangle, Mic, MicOff, Settings } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
@@ -196,6 +198,26 @@ function TopCloseButton({ onClose }: { onClose: () => void }) {
   )
 }
 
+// Guards against a silent hang on "Connecting..." -- if the WebRTC handshake
+// with LiveKit Cloud hasn't reached Connected within CONNECT_TIMEOUT_MS
+// (e.g. a bad/misconfigured NEXT_PUBLIC_LIVEKIT_URL, or the LiveKit project
+// unreachable), surface it as a visible error instead of spinning forever.
+// Must render as a child of <LiveKitRoom> -- useConnectionState() reads off
+// its context, same as every other @livekit/components-react hook.
+const CONNECT_TIMEOUT_MS = 15000
+
+function ConnectionWatcher({ onTimeout }: { onTimeout: () => void }) {
+  const connectionState = useConnectionState()
+
+  useEffect(() => {
+    if (connectionState === ConnectionState.Connected) return
+    const timer = setTimeout(onTimeout, CONNECT_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [connectionState, onTimeout])
+
+  return null
+}
+
 // Split out from VoiceModal because useVoiceAssistant()/useLocalParticipant()
 // (and every other @livekit/components-react hook) reads room state from the
 // <LiveKitRoom> context provider, so it must render as a *child* of
@@ -289,6 +311,10 @@ export default function VoiceModal({ chatSessionId, isOpen, onClose }: VoiceModa
       setLoading(true)
       setError(null)
       try {
+        if (!process.env.NEXT_PUBLIC_LIVEKIT_URL) {
+          throw new Error('Voice is not configured: NEXT_PUBLIC_LIVEKIT_URL is missing.')
+        }
+
         const supabase = createClient()
         const { data: { session } } = await supabase.auth.getSession()
         const accessToken = session?.access_token || ''
@@ -369,6 +395,9 @@ export default function VoiceModal({ chatSessionId, isOpen, onClose }: VoiceModa
               onDisconnected={onClose}
               className="flex-1 flex flex-col items-center justify-between w-full"
             >
+              <ConnectionWatcher
+                onTimeout={() => setError('Connection timed out. Please check your voice service configuration and try again.')}
+              />
               <ActiveVoiceSession onClose={onClose} />
             </LiveKitRoom>
           )}
