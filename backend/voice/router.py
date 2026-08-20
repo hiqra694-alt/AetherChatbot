@@ -28,6 +28,12 @@ router = APIRouter(prefix="/api/voice", tags=["voice"])
 
 VOICE_TOKEN_TTL = timedelta(hours=2)
 
+# Must match WorkerOptions(agent_name=...) in voice/agent.py -- LiveKit Cloud
+# only routes a room to that worker when a token explicitly dispatches this
+# named agent via RoomConfiguration below; without it the worker registers
+# but is never assigned any room to join.
+VOICE_AGENT_NAME = "aether-agent"
+
 
 @router.post("/token", response_model=VoiceTokenResponse)
 async def issue_voice_token(
@@ -52,6 +58,11 @@ async def issue_voice_token(
             .with_identity(str(user.id))
             .with_name(user.email or "AetherChat User")
             .with_grants(api.VideoGrants(room_join=True, room=request.chat_session_id))
+            .with_room_config(
+                api.RoomConfiguration(
+                    agents=[api.RoomAgentDispatch(agent_name=VOICE_AGENT_NAME)]
+                )
+            )
             .with_ttl(VOICE_TOKEN_TTL)
             .to_jwt()
         )

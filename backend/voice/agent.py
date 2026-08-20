@@ -551,6 +551,12 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            # Must match RoomAgentDispatch(agent_name=...) in voice/router.py's
+            # token generation -- explicit dispatch (not automatic) is what
+            # LiveKit Cloud uses to route a room to this worker; without a
+            # matching agent_name here the worker registers but is never
+            # assigned a room to join.
+            agent_name="aether-agent",
             ws_url=settings.livekit_url,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,
