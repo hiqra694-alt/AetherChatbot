@@ -182,7 +182,7 @@ STT_UTTERANCE_END_MS = 1000
 # token cost, comfortably fits the same TPM budget) -- see
 # https://console.groq.com/docs/models for the current supported list,
 # since Groq has repeatedly deprecated models on short notice here.
-GROQ_LLM_MODEL = "llama3-8b-8192"
+GROQ_LLM_MODEL = "openai/gpt-oss-120b"
 
 # Dedicated thread pool for this module's own blocking, off-loop Supabase
 # work (chat-history fetch + turn persistence) -- deliberately NOT asyncio's
