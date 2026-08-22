@@ -1,8 +1,8 @@
 """
 Canvas feature (Phase 1): isolated Google Drive OAuth + Markdown export.
 Entirely self-contained in the canvas/ package -- never imports from or
-modifies mcp_integration/intent_router.py or the Gmail MCP files. See
-canvas/drive_oauth.py's module docstring for the isolation rationale.
+modifies connector_integrations/. See canvas/drive_oauth.py's module
+docstring for the isolation rationale.
 
 Registered in main.py alongside the app's other routers (one additive
 `include_router` call, same as every other router there).

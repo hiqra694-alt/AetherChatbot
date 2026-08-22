@@ -42,79 +42,53 @@ class Settings(BaseSettings):
     # simply connects to nothing until this is populated.
     mcp_server_urls: str = Field("", validation_alias=AliasChoices("mcp_server_urls", "MCP_SERVER_URLS"))
 
-    # GitHub MCP connector: both must be set for MCPClientManager to dial it
-    # (see mcp_integration.mcp_manager._build_default_server_specs). The
-    # token is sent as a Bearer header on the SSE connection, never logged.
-    github_personal_access_token: str = Field(
-        "", validation_alias=AliasChoices("github_personal_access_token", "GITHUB_PERSONAL_ACCESS_TOKEN")
+    # Native Google Workspace connector (Phase 2, api/connectors/google_oauth.py
+    # + connector_integrations/google_tools.py): one shared OAuth client
+    # backing the native Gmail/Calendar/Drive tools, requesting all four
+    # scopes (gmail.modify, calendar.events, drive.readonly, drive.file) up
+    # front so the frontend's independent google_gmail/google_calendar/
+    # google_drive toggles never need to re-prompt for consent. Its refresh
+    # token is stored under the distinct 'google_workspace' user_oauth_tokens
+    # row -- never the plain 'google' row, nor 'google_drive' (Canvas's own,
+    # narrower-scoped client above). All three must be set for
+    # /api/connectors/google/authorize to work; empty by default -- that
+    # route 503s until configured.
+    google_workspace_client_id: str = Field(
+        "", validation_alias=AliasChoices("google_workspace_client_id", "GOOGLE_WORKSPACE_CLIENT_ID")
     )
-    github_mcp_server_url: str = Field(
-        "", validation_alias=AliasChoices("github_mcp_server_url", "GITHUB_MCP_SERVER_URL")
+    google_workspace_client_secret: str = Field(
+        "", validation_alias=AliasChoices("google_workspace_client_secret", "GOOGLE_WORKSPACE_CLIENT_SECRET")
     )
-
-    # Google Workspace MCP connector (Phase 4): unlike GitHub, this has no
-    # single shared token -- MCPClientManager.create_workspace_session opens
-    # a fresh, per-request session against this URL using that request's own
-    # google_access_token, so only the URL (never a token) is static config.
-    google_workspace_mcp_url: str = Field(
-        "", validation_alias=AliasChoices("google_workspace_mcp_url", "GOOGLE_WORKSPACE_MCP_URL")
-    )
-
-    # Server-side refresh-token fallback (mcp_integration.mcp_manager
-    # .create_workspace_session / _refresh_google_access_token): used to
-    # exchange a stored user_oauth_tokens.refresh_token for a fresh Google
-    # access token via Google's own token endpoint when a request doesn't
-    # carry a live one. Must match the OAuth client configured in Supabase's
-    # Google provider settings, since the refresh_token was minted for that
-    # client. Both empty by default -- the fallback is simply skipped (same
-    # as no token at all) until both are set.
-    google_client_id: str = Field(
-        "", validation_alias=AliasChoices("google_client_id", "GOOGLE_CLIENT_ID")
-    )
-    google_client_secret: str = Field(
-        "", validation_alias=AliasChoices("google_client_secret", "GOOGLE_CLIENT_SECRET")
+    google_workspace_redirect_uri: str = Field(
+        "", validation_alias=AliasChoices("google_workspace_redirect_uri", "GOOGLE_WORKSPACE_REDIRECT_URI")
     )
 
-    # Gmail MCP connector (Phase 1, mcp_integration/gmail_mcp.py +
-    # gmail_mcp_router.py): a fully separate OAuth client from
-    # google_client_id/google_client_secret above -- this one talks
-    # directly to Google's OAuth endpoints (never through Supabase's own
-    # provider-linking flow) and its refresh token is stored under the
-    # distinct 'google_gmail_mcp' user_oauth_tokens row, never the plain
-    # 'google' row. All three must be set for /api/connectors/gmail-mcp/
-    # authorize to work; empty by default -- that route 503s until
-    # configured.
-    gmail_mcp_client_id: str = Field(
-        "", validation_alias=AliasChoices("gmail_mcp_client_id", "GMAIL_MCP_CLIENT_ID")
-    )
-    gmail_mcp_client_secret: str = Field(
-        "", validation_alias=AliasChoices("gmail_mcp_client_secret", "GMAIL_MCP_CLIENT_SECRET")
-    )
-    gmail_mcp_redirect_uri: str = Field(
-        "", validation_alias=AliasChoices("gmail_mcp_redirect_uri", "GMAIL_MCP_REDIRECT_URI")
+    # Local-development-only escape hatch (api/connectors/google_oauth.py):
+    # when true, GET /api/connectors/google/authorize additionally accepts a
+    # `dev_user_id` query param as an UNVERIFIED substitute for a real
+    # Supabase `access_token`. False by default -- must never be set in any
+    # deployed environment.
+    google_workspace_dev_mode: bool = Field(
+        False, validation_alias=AliasChoices("google_workspace_dev_mode", "GOOGLE_WORKSPACE_DEV_MODE")
     )
 
-    # Local-development-only escape hatch (mcp_integration/gmail_mcp_router.py):
-    # when true, GET /api/connectors/gmail-mcp/authorize additionally accepts
-    # a `dev_user_id` query param as an UNVERIFIED substitute for a real
-    # Supabase `access_token`, so the Google consent/redirect/callback flow
-    # can be exercised by pasting a URL straight into a browser instead of
-    # extracting a live JWT first. False by default -- must be explicitly
-    # set to true, and must never be set in any deployed environment, since
-    # it lets the caller claim to be any user_id with zero verification.
-    gmail_mcp_dev_mode: bool = Field(
-        False, validation_alias=AliasChoices("gmail_mcp_dev_mode", "GMAIL_MCP_DEV_MODE")
+    # Base URL of the Next.js frontend -- used by api/connectors/google_oauth.py's
+    # /callback to send the browser back to the app once the connection is
+    # saved (it lands there as a plain top-level redirect, not through the
+    # Next.js middleware's backend rewrite, so it needs the frontend's own
+    # origin, not this API's). Defaults to the local Next dev server; must be
+    # set to the deployed frontend origin (e.g. the Vercel domain) in
+    # production.
+    frontend_url: str = Field(
+        "http://localhost:3000", validation_alias=AliasChoices("frontend_url", "FRONTEND_URL")
     )
 
     # Canvas Drive connector (Phase 1, canvas/drive_oauth.py + canvas/router.py):
-    # a fully separate OAuth client from google_client_id/google_client_secret
-    # and gmail_mcp_client_id/gmail_mcp_client_secret above -- this one talks
-    # directly to Google's OAuth endpoints requesting the restrictive
-    # drive.file scope, and its refresh token is stored under the distinct
-    # 'google_drive' user_oauth_tokens row, never the 'google' or
-    # 'google_gmail_mcp' rows. All three must be set for
-    # /api/canvas/drive/authorize to work; empty by default -- that route
-    # 503s until configured.
+    # its own dedicated OAuth client, talking directly to Google's OAuth
+    # endpoints requesting the restrictive drive.file scope, with its
+    # refresh token stored under the distinct 'google_drive' user_oauth_tokens
+    # row. All three must be set for /api/canvas/drive/authorize to work;
+    # empty by default -- that route 503s until configured.
     canvas_drive_client_id: str = Field(
         "", validation_alias=AliasChoices("canvas_drive_client_id", "CANVAS_DRIVE_CLIENT_ID")
     )

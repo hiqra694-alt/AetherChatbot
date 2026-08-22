@@ -76,7 +76,11 @@ async def connector_status(
         logger.error(f"Failed to look up stored OAuth providers for user {user_id}: {db_err}")
         raise HTTPException(status_code=500, detail="Failed to load connector status. Please try again later.")
 
-    return ConnectorStatusResponse(google="google" in providers, github="github" in providers)
+    return ConnectorStatusResponse(
+        google="google" in providers,
+        github="github" in providers,
+        google_workspace="google_workspace" in providers,
+    )
 
 
 @router.post("/store-token", response_model=StoreTokenResponse)

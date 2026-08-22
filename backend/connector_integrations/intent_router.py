@@ -3,25 +3,24 @@ Dynamic Intent Router -- picks a small, relevant subset of a large MCP
 connector's tool schemas for one specific chat turn, instead of always
 offering every tool the connector advertises.
 
-Exists because Google's managed Gmail MCP server (mcp_integration/gmail_mcp.py)
-exposes 21 full tool schemas (~14k tokens): sending all of them on every turn
-blew past Groq's 12,000 TPM limit and got the whole request rejected with an
-HTTP 413. Rather than hardcoding a permanent static whitelist (which would
-silently make 16 of the 21 tools unreachable forever, regardless of what the
-user actually asks for), this scores each tool against the current user
-message and keeps only the top `max_tools` -- so a "search my email" turn
-gets the search tools, a "draft a reply" turn gets the drafting tools, and
-the full 21-tool catalog stays reachable across turns even though no single
-turn ever offers more than `max_tools` of them.
+Originally built because Google's managed Gmail MCP server exposed 21 full
+tool schemas (~14k tokens): sending all of them on every turn blew past
+Groq's 12,000 TPM limit and got the whole request rejected with an HTTP
+413. Rather than hardcoding a permanent static whitelist (which would
+silently make most tools unreachable forever, regardless of what the user
+actually asks for), this scores each tool against the current user message
+and keeps only the top `max_tools` -- so a "search my email" turn gets the
+search tools, a "draft a reply" turn gets the drafting tools, and the full
+catalog stays reachable across turns even though no single turn ever offers
+more than `max_tools` of them.
 
 Deliberately generic over its `all_tools` input: each entry can be either an
 `mcp.types.Tool` (has `.name`/`.description` attributes, e.g. a raw MCP
 session's `.tools` list) or this app's own native tool-schema dict shape
 (`{"type": "function", "function": {"name": ..., "description": ...}}`, e.g.
-api.chat.tools.ALL_TOOLS) -- see _tool_name_and_description. Only ever wired
-into the Gmail MCP merge point today (api/chat/services.py), but scoped
-generically enough to reuse against another oversized connector later
-without changes here.
+api.chat.tools.ALL_TOOLS) -- see _tool_name_and_description. That Gmail MCP
+connector has since been removed; this module is kept, unwired, to route
+the native Google Workspace tools (Gmail/Calendar/Drive) replacing it.
 """
 
 import logging
@@ -157,3 +156,70 @@ def _log_selection(query: str, selected: list, all_tools: list) -> None:
         '[IntentRouter] User Query: "%s" -> Selected %d tools from %d available tools: [%s]',
         query, len(selected), len(all_tools), ", ".join(names),
     )
+
+
+# ============================================================
+# Native Google Workspace tools (Phase 4) -- see
+# connector_integrations/google_tools.py's GOOGLE_WORKSPACE_TOOLS registry
+# for the actual 8 functions/schemas this routes.
+# ============================================================
+
+# Maps each frontend connector toggle id (src/app/page.tsx's CONNECTORS
+# array, sent in the chat request's enabled_connectors) to the native
+# Google Workspace tool names it covers. Kept here as a plain, dependency-
+# free name list -- deliberately NOT imported from google_tools.py, so this
+# module never needs the Google API client libraries just to know which
+# names belong to which toggle (see the module docstring's "generic over
+# its all_tools input" design).
+GOOGLE_WORKSPACE_TOOL_GROUPS: dict[str, tuple[str, ...]] = {
+    "google_gmail": ("gmail_search_recent", "gmail_read_thread", "gmail_create_draft", "gmail_send_email"),
+    "google_calendar": ("calendar_list_events", "calendar_create_event"),
+    "google_drive": ("drive_search_docs", "drive_create_doc"),
+}
+
+
+def select_google_workspace_tools(
+    user_query: Optional[str],
+    all_tool_schemas: list,
+    enabled_connectors: Optional[list],
+    max_tools: int = 5,
+) -> list:
+    """
+    Narrows `all_tool_schemas` (every native Google Workspace tool schema --
+    see google_tools.GOOGLE_WORKSPACE_TOOLS/google_tool_to_native_schema)
+    down to whichever ones should be offered this turn, in two passes:
+
+    1. Toggle filter: only tools whose GOOGLE_WORKSPACE_TOOL_GROUPS entry
+       is present in `enabled_connectors` are even candidates -- e.g.
+       toggling on just "google_gmail" excludes every Calendar/Drive tool
+       regardless of how well it might score against `user_query`. Unlike
+       get_merged_tool_schemas' own enabled_connectors contract, None/empty
+       here means "offer nothing", not "offer everything" -- there's no
+       reason to ever spend a Google credential refresh + API round trip on
+       a turn the frontend never toggled any of these connectors for.
+    2. Intent/keyword routing: select_relevant_tools further narrows those
+       candidates to the top `max_tools` most relevant to `user_query` --
+       the same purpose this module was originally built for (see the
+       module docstring), now covering up to 8 candidates (all three
+       toggles at once) instead of the original 21-tool Gmail MCP catalog.
+    """
+    if not enabled_connectors:
+        return []
+
+    allowed_names = {
+        name
+        for connector_id, names in GOOGLE_WORKSPACE_TOOL_GROUPS.items()
+        if connector_id in enabled_connectors
+        for name in names
+    }
+    if not allowed_names:
+        return []
+
+    candidates = [
+        tool for tool in all_tool_schemas
+        if _tool_name_and_description(tool)[0] in allowed_names
+    ]
+    if not candidates:
+        return []
+
+    return select_relevant_tools(user_query, candidates, max_tools=max_tools)

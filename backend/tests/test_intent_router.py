@@ -4,7 +4,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mcp import types
-from mcp_integration.intent_router import select_relevant_tools, FALLBACK_TOOL_NAMES
+from connector_integrations.intent_router import select_relevant_tools, FALLBACK_TOOL_NAMES
 
 
 def _tool(name: str, description: str) -> types.Tool:
@@ -149,7 +149,7 @@ def test_selected_tools_are_the_original_objects_not_copies():
 
 def test_logs_selection_summary(caplog):
     import logging
-    with caplog.at_level(logging.INFO, logger="mcp_integration.intent_router"):
+    with caplog.at_level(logging.INFO, logger="connector_integrations.intent_router"):
         select_relevant_tools("search my inbox for invoices", _GMAIL_LIKE_TOOLS, max_tools=5)
 
     assert any("[IntentRouter]" in record.message for record in caplog.records)

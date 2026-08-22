@@ -22,7 +22,7 @@ def _get_scheduler_supabase() -> Optional[Client]:
     Returns None -- rather than raising -- when it isn't configured, so a
     deployment that hasn't set it up yet still starts cleanly with the
     scheduler simply idling, matching the MCP manager's "no servers
-    configured -> no-op" convention in mcp_integration/mcp_manager.py.
+    configured -> no-op" convention in connector_integrations/connector_manager.py.
     """
     settings = get_settings()
     if not settings.supabase_url or not settings.supabase_service_role_key:

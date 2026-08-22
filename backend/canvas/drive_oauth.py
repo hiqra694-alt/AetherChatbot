@@ -2,18 +2,17 @@
 Isolated Google Drive OAuth for the Canvas feature (Phase 1) -- fully
 separate from every other connector in this codebase.
 
-Deliberately duplicates rather than reuses machinery from mcp_integration/
-gmail_mcp.py (its own state-signing scheme, its own token-refresh helper,
-its own service-role client builder) even though the shape is identical.
-That's intentional, not an oversight: this module authenticates against a
+Deliberately duplicates rather than reuses machinery from connector_integrations/
+(its own state-signing scheme, its own token-refresh helper, its own
+service-role client builder) even where the shape is similar. That's
+intentional, not an oversight: this module authenticates against a
 brand-new, separate OAuth client (CANVAS_DRIVE_CLIENT_ID/SECRET/REDIRECT_URI)
 and stores its token under a brand-new, distinct user_oauth_tokens provider
 row ('google_drive' -- see CANVAS_DRIVE_PROVIDER below), so that linking or
-refreshing it can never read, overwrite, or otherwise interact with the
-existing 'google' row (create_workspace_session's refresh fallback) or the
-'google_gmail_mcp' row (gmail_mcp.py). Keeping the code paths fully separate
-is what guarantees that; sharing a helper would risk a future edit to one
-silently affecting the others.
+refreshing it can never read, overwrite, or otherwise interact with any
+other provider's row. Keeping the code paths fully separate is what
+guarantees that; sharing a helper would risk a future edit to one silently
+affecting the others.
 """
 
 import base64

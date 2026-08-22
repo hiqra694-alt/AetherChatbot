@@ -13,9 +13,9 @@ reimplemented here, only argument pass-through.
     create_task/list_tasks/complete_task -- the exact functions text chat
     wraps for the same capabilities, called directly here by name instead
     of being reimplemented.
-  - MCP execution: mcp_integration.mcp_manager's singleton `mcp_manager`,
-    the same MCPClientManager api/chat/services.py routes generic MCP tool
-    calls through (see its "Executing MCP Tool" branch).
+  - MCP execution: connector_integrations.connector_manager's singleton
+    `mcp_manager`, the same MCPClientManager api/chat/services.py routes
+    generic MCP tool calls through (see its "Executing MCP Tool" branch).
 
 Native vs. MCP routing mirrors api/chat/services.py's own dispatcher (see
 its "Execution Router" comment): a tool name in api.chat.tools.ALL_TOOL_NAMES
@@ -72,7 +72,7 @@ from api.chat.tools import list_documents as _list_documents
 from api.chat.tools import list_tasks as _list_tasks
 from api.chat.tools import search_chat_history as _search_chat_history
 from api.documents.services import format_retrieved_chunks, get_relevant_context
-from mcp_integration.mcp_manager import mcp_manager
+from connector_integrations.connector_manager import mcp_manager
 
 logger = logging.getLogger(__name__)
 

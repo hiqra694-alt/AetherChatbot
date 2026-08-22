@@ -60,27 +60,18 @@ async def chat_endpoint(
     enabled_connectors: Optional[List[str]] = Form(
         None,
         description=(
-            "IDs of the MCP connectors currently toggled on by the user (e.g. 'github', "
-            "'brave_search'). Native tools are always available regardless of this list. "
+            "IDs of the MCP connectors currently toggled on by the user (e.g. a generic "
+            "MCP_SERVER_URLS entry such as 'brave_search'), plus google_gmail/google_calendar/"
+            "google_drive. Native tools are always available regardless of this list. "
             "Omit entirely to offer every connected connector -- the backward-compatible default."
         ),
     ),
     google_access_token: Optional[str] = Form(
         None,
         description=(
-            "This user's own Google OAuth access token, if the Google Workspace connector is "
-            "enabled client-side. Used to open a short-lived, per-request MCP session scoped to "
-            "this one user -- never stored, never shared across requests."
-        ),
-    ),
-    github_access_token: Optional[str] = Form(
-        None,
-        description=(
-            "This user's own GitHub OAuth access token, if the GitHub connector is enabled "
-            "client-side (Phase 6). Same per-request/per-user contract as google_access_token: "
-            "used to open a short-lived MCP session scoped to this one user -- never stored, "
-            "never shared across requests, and independent of any process-wide "
-            "GITHUB_PERSONAL_ACCESS_TOKEN the deployment may also have configured."
+            "This user's own Google OAuth access token, if a Google connector (Gmail/Calendar/"
+            "Drive) is enabled client-side. Not yet consumed server-side -- plumbed through for "
+            "the native Google tools replacing the retired Google Managed MCP Workspace connector."
         ),
     ),
     auth: Tuple[Client, str] = Depends(get_authenticated_supabase),
@@ -173,7 +164,6 @@ async def chat_endpoint(
         scoped_document_name=file.filename if file is not None else None,
         enabled_connectors=enabled_connectors,
         google_access_token=google_access_token,
-        github_access_token=github_access_token
     )
 
     # Gemini-style global memory: after every turn with a user message, ask a

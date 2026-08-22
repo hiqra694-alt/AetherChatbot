@@ -24,8 +24,8 @@ VOICE_SYSTEM_PROMPT = (
 
 def build_mcp_tools_prompt_block(mcp_tools: Iterable) -> str:
     """
-    Formats the MCP tools currently discovered by mcp_manager (e.g. GitHub)
-    into a text block appended to VOICE_SYSTEM_PROMPT at session start (see
+    Formats the MCP tools currently discovered by mcp_manager (e.g. a
+    generic MCP_SERVER_URLS entry such as Brave Search) into a text block appended to VOICE_SYSTEM_PROMPT at session start (see
     voice/agent.py's entrypoint), so the voice LLM actually knows which
     tool_name/arguments are valid to pass to VoiceTools.execute_mcp_tool.
 

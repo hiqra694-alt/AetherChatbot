@@ -128,7 +128,7 @@ from livekit.plugins import cartesia, deepgram, groq
 from supabase import Client, create_client
 
 from core.config import get_settings
-from mcp_integration.mcp_manager import mcp_manager
+from connector_integrations.connector_manager import mcp_manager
 from voice.prompts import VOICE_SYSTEM_PROMPT, build_mcp_tools_prompt_block
 from voice.tools_adapter import VoiceTools
 

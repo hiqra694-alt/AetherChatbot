@@ -48,7 +48,7 @@ def test_status_reports_stored_providers(mock_create_client):
     response = client.get("/api/connectors/status", headers={"Authorization": "Bearer fake_token"})
 
     assert response.status_code == 200
-    assert response.json() == {"google": True, "github": False}
+    assert response.json() == {"google": True, "github": False, "google_workspace": False}
 
 
 @patch("api.connectors.routers.create_client")
@@ -61,20 +61,22 @@ def test_status_reports_no_providers_stored(mock_create_client):
     response = client.get("/api/connectors/status", headers={"Authorization": "Bearer fake_token"})
 
     assert response.status_code == 200
-    assert response.json() == {"google": False, "github": False}
+    assert response.json() == {"google": False, "github": False, "google_workspace": False}
 
 
 @patch("api.connectors.routers.create_client")
 def test_status_both_providers_stored(mock_create_client):
     mock_supabase = _make_mock_supabase()
-    mock_table = _mock_select_table([{"provider": "google"}, {"provider": "github"}])
+    mock_table = _mock_select_table([
+        {"provider": "google"}, {"provider": "github"}, {"provider": "google_workspace"},
+    ])
     mock_supabase.table.return_value = mock_table
     mock_create_client.return_value = mock_supabase
 
     response = client.get("/api/connectors/status", headers={"Authorization": "Bearer fake_token"})
 
     assert response.status_code == 200
-    assert response.json() == {"google": True, "github": True}
+    assert response.json() == {"google": True, "github": True, "google_workspace": True}
 
 
 def test_status_unauthorized():

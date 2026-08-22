@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 class OAuthProvider(str, Enum):
     GOOGLE = "google"
     GITHUB = "github"
+    GOOGLE_WORKSPACE = "google_workspace"
 
 
 class StoreTokenRequest(BaseModel):
@@ -51,3 +52,11 @@ class ConnectorStatusResponse(BaseModel):
     """
     google: bool = Field(..., description="Whether a usable Google refresh_token is stored server-side")
     github: bool = Field(..., description="Whether a usable GitHub refresh_token is stored server-side")
+    google_workspace: bool = Field(
+        ...,
+        description=(
+            "Whether a usable native Google Workspace refresh_token (Gmail/Calendar/Drive, see "
+            "api/connectors/google_oauth.py) is stored server-side -- distinct from `google` above, "
+            "which reflects Supabase's own 'google' sign-in identity, not this connector."
+        ),
+    )

@@ -7,12 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.chat.routers import router as chat_router
 from api.chat.tools import ALL_TOOLS
 from api.connectors.routers import router as connectors_router
+from api.connectors.google_oauth import router as google_oauth_router
 from api.documents.routers import router as documents_router
 from api.memory.routers import router as memory_router
 from api.tasks.routers import router as tasks_router
 from core.scheduler import run_scheduler_loop
-from mcp_integration.mcp_manager import mcp_manager, get_merged_tool_schemas
-from mcp_integration.gmail_mcp_router import router as gmail_mcp_router
+from connector_integrations.connector_manager import mcp_manager, get_merged_tool_schemas
 from canvas.router import router as canvas_router
 from voice.router import router as voice_router
 
@@ -69,16 +69,16 @@ app.add_middleware(
 # Include API Routers
 app.include_router(chat_router)
 app.include_router(connectors_router)
+# Unified Google Workspace OAuth (Phase 2) -- native Gmail/Calendar/Drive
+# tools' auth flow, see api/connectors/google_oauth.py. Separate router from
+# connectors_router (same /api/connectors prefix family) since it owns its
+# own /google/authorize + /google/callback routes.
+app.include_router(google_oauth_router)
 app.include_router(documents_router)
 app.include_router(memory_router)
 app.include_router(tasks_router)
-# Gmail MCP connector (Phase 1) -- fully isolated OAuth routes, see
-# mcp_integration/gmail_mcp_router.py. Never touches connectors_router or
-# the Supabase identity-linking flow it backs.
-app.include_router(gmail_mcp_router)
 # Canvas feature (Phase 1) -- fully isolated Google Drive OAuth + export
-# routes, see canvas/router.py. Never touches intent_router.py or the Gmail
-# MCP files.
+# routes, see canvas/router.py. Never touches connector_integrations/.
 app.include_router(canvas_router)
 # Voice agent (Phase 1) -- fully isolated LiveKit token-issuance route, see
 # voice/router.py. Never touches api/chat/routers.py, the RAG pipeline, or

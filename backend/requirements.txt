@@ -29,3 +29,6 @@ fastembed
 mcp==1.29.0
 livekit-api==1.2.0
 livekit-agents
+google-api-python-client
+google-auth
+google-auth-oauthlib
