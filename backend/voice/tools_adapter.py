@@ -1,8 +1,8 @@
 """
 Voice agent tool adapter (Phase 2): thin @function_tool wrappers that let
-the voice agent's LLM call the exact same retrieval, native-tool, and MCP
-execution logic the text chat pipeline already uses -- no business logic is
-reimplemented here, only argument pass-through.
+the voice agent's LLM call the exact same retrieval and native-tool logic
+the text chat pipeline already uses -- no business logic is reimplemented
+here, only argument pass-through.
 
   - Retrieval: api.documents.services.get_relevant_context, the same hybrid
     (Supabase RPC + local BM25/cross-encoder rerank) retrieval function
@@ -13,30 +13,31 @@ reimplemented here, only argument pass-through.
     create_task/list_tasks/complete_task -- the exact functions text chat
     wraps for the same capabilities, called directly here by name instead
     of being reimplemented.
-  - MCP execution: connector_integrations.connector_manager's singleton
-    `mcp_manager`, the same MCPClientManager api/chat/services.py routes
-    generic MCP tool calls through (see its "Executing MCP Tool" branch).
+  - Google Workspace: the 8 native Gmail/Calendar/Drive functions in
+    connector_integrations.google_tools, each exposed here as its own
+    dedicated @function_tool (same one-per-capability shape as the
+    BASE_TOOLS above) that forwards straight to
+    google_tools.execute_google_workspace_tool for validation + dispatch --
+    no argument handling is reimplemented here, same contract as every
+    other tool in this file.
 
-Native vs. MCP routing mirrors api/chat/services.py's own dispatcher (see
-its "Execution Router" comment): a tool name in api.chat.tools.ALL_TOOL_NAMES
-is one of *this app's* own tools and always runs natively; anything else is
-assumed to come from a connected MCP server. The difference here is *where*
-that distinction is made. Text chat exposes each tool (native or MCP) to the
-model under its own real name via get_merged_tool_schemas, so the model
-always calls a concrete, correctly-routed name and the router only ever sees
-names the model was actually offered. Voice instead exposes one generic
-execute_mcp_tool(tool_name, ...) escape hatch for MCP tools (LiveKit's
-Toolset gives every @function_tool method its own static schema, not a
-per-session dynamically-merged one, so mirroring get_merged_tool_schemas
-exactly isn't a small change) -- which previously meant a native capability
-voice had no dedicated tool for (e.g. weather) could only be reached, if the
-model reached for it at all, by guessing a plausible-sounding tool_name and
-routing it through that MCP-only escape hatch, where mcp_manager correctly
-had no connected server advertising it and rejected the call. Fixed on both
-sides: every BASE_TOOLS capability now has its own real native @function_tool
-here (so the model has a correct, direct way to call it), and
-execute_mcp_tool itself now rejects any tool_name that's actually native
-before ever reaching mcp_manager (see its docstring below).
+No MCP execution path here: this Toolset used to also expose a generic
+execute_mcp_tool(tool_name, ...) escape hatch routed through
+connector_integrations.connector_manager's singleton `mcp_manager` (the same
+MCPClientManager api/chat/services.py's "Executing MCP Tool" branch still
+uses for text chat). It's been removed now that every capability voice
+actually needs -- native tools and Google Workspace alike -- has its own
+dedicated @function_tool with a real, LLM-visible schema (LiveKit's Toolset
+gives each @function_tool method its own static schema, not a per-session
+dynamically-merged one the way text chat's get_merged_tool_schemas works,
+so there was no way to keep that escape hatch generic without the model
+having to guess a plausible-sounding tool_name blind). `mcp_manager` itself
+is untouched and still connects to whatever static MCP servers are
+configured (e.g. a generic MCP_SERVER_URLS entry like Brave Search) --
+text chat still routes to it; only this Toolset's bridge into it is gone.
+A future voice-facing MCP integration should get its own dedicated
+@function_tool here, the same way each Google Workspace tool did, rather
+than reintroducing a generic passthrough.
 
 Built on livekit.agents.llm.Toolset rather than the older ai_callable/
 FunctionContext pattern: as installed here (livekit-agents==1.6.10), that
@@ -55,13 +56,12 @@ that caller's own documents.
 
 import json
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from livekit.agents import function_tool
 from livekit.agents.llm import Toolset
 from supabase import Client
 
-from api.chat.tools import ALL_TOOL_NAMES
 from api.chat.tools import calculator as _calculator
 from api.chat.tools import complete_task as _complete_task
 from api.chat.tools import create_task as _create_task
@@ -72,7 +72,7 @@ from api.chat.tools import list_documents as _list_documents
 from api.chat.tools import list_tasks as _list_tasks
 from api.chat.tools import search_chat_history as _search_chat_history
 from api.documents.services import format_retrieved_chunks, get_relevant_context
-from connector_integrations.connector_manager import mcp_manager
+from connector_integrations.google_tools import execute_google_workspace_tool
 
 logger = logging.getLogger(__name__)
 
@@ -240,52 +240,155 @@ class VoiceTools(Toolset):
             return json.dumps({"error": "No authenticated user to complete a task for."})
         return await _complete_task(self._supabase, self._user_id, task_id)
 
+    def _google_workspace_unavailable(self) -> Optional[str]:
+        if not (self._supabase and self._user_id):
+            return json.dumps({"error": "Google Workspace tools are unavailable for this session."})
+        return None
+
     @function_tool
-    async def execute_mcp_tool(self, tool_name: str, arguments_json: str) -> str:
-        """Execute a tool exposed by a connected MCP server (e.g. GitHub) by its
-        exact name, passing through the arguments it expects. Only for tools
-        provided by an external MCP connector -- never call this for this
-        assistant's own built-in capabilities (weather, time, calculator,
-        chat history, knowledge base search, task management), which each
-        have their own dedicated tool above; call those directly by name
-        instead.
+    async def gmail_search_recent(self, query: str, max_results: int = 10) -> str:
+        """Search the user's Gmail for recent messages matching a query, returning
+        each match's id, thread id, subject, sender, date, and snippet. Call this
+        first to find a message before reading its full content or replying to
+        it -- it does not return full message bodies.
 
         Args:
-            tool_name: The exact name of the MCP tool to execute.
-            arguments_json: The arguments to pass to the MCP tool, encoded as a
-                JSON object string (e.g. '{"owner": "foo", "repo": "bar"}', or
-                '{}' if the tool takes no arguments).
+            query: Gmail search query using Gmail's own search operators, e.g.
+                'from:boss@company.com is:unread', 'subject:invoice after:2024/01/01',
+                or a plain keyword search.
+            max_results: Maximum number of messages to return (1-50). Default is 10.
         """
-        if tool_name in ALL_TOOL_NAMES:
-            logger.warning(
-                "Voice: execute_mcp_tool called with native tool name '%s' -- "
-                "this assistant has a dedicated tool for that; call it directly instead.",
-                tool_name,
-            )
-            return json.dumps({
-                "error": (
-                    f"'{tool_name}' is one of this assistant's own built-in tools, not an "
-                    "MCP tool. Call it directly by its own name instead of through execute_mcp_tool."
-                )
-            })
-        # arguments is typed as a JSON-encoded string, not `dict`, because MCP
-        # tools accept arbitrary/unknown keys -- an open-ended object can't be
-        # expressed under OpenAI strict-mode tool schemas, which require
-        # `additionalProperties: false` on every object in the schema (see
-        # livekit.agents.llm._strict.to_strict_json_schema). Pydantic renders
-        # `dict`/`Dict[str, Any]` params with `additionalProperties: true`
-        # already set, so livekit's strict-schema pass (which only fills in
-        # `additionalProperties` when the key is absent) leaves it as `true`
-        # and the strict-mode LLM endpoint rejects the tool schema outright.
-        # A plain `str` param has no such object to close over, sidestepping
-        # the conflict entirely; we decode it back to a dict here instead.
-        try:
-            arguments = json.loads(arguments_json)
-        except (TypeError, ValueError):
-            logger.warning("Voice: execute_mcp_tool got non-JSON arguments_json: %r", arguments_json)
-            return json.dumps({"error": "arguments_json must be a valid JSON object string."})
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "gmail_search_recent", {"query": query, "max_results": max_results}, self._supabase, self._user_id
+        )
 
-        if not isinstance(arguments, dict):
-            return json.dumps({"error": "arguments_json must decode to a JSON object."})
+    @function_tool
+    async def gmail_read_thread(self, thread_id: str) -> str:
+        """Read the full content of every message in a Gmail thread (subject,
+        sender, date, and body text for each message), in order. Use this after
+        gmail_search_recent has identified the thread the user is asking about.
 
-        return await mcp_manager.call_tool(tool_name, arguments)
+        Args:
+            thread_id: The Gmail thread id to read, as returned by gmail_search_recent.
+        """
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "gmail_read_thread", {"thread_id": thread_id}, self._supabase, self._user_id
+        )
+
+    @function_tool
+    async def gmail_create_draft(self, to: str, subject: str, body: str) -> str:
+        """Create a draft email in the user's Gmail account without sending it.
+        Use this when the user asks you to draft, prepare, or write an email for
+        their review rather than send it immediately.
+
+        Args:
+            to: Recipient email address.
+            subject: Email subject line.
+            body: Plain-text email body.
+        """
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "gmail_create_draft", {"to": to, "subject": subject, "body": body}, self._supabase, self._user_id
+        )
+
+    @function_tool
+    async def gmail_send_email(self, to: str, subject: str, body: str) -> str:
+        """Send an email immediately from the user's Gmail account. Only use
+        this when the user has clearly asked you to send an email now -- prefer
+        gmail_create_draft when they want to review it first.
+
+        Args:
+            to: Recipient email address.
+            subject: Email subject line.
+            body: Plain-text email body.
+        """
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "gmail_send_email", {"to": to, "subject": subject, "body": body}, self._supabase, self._user_id
+        )
+
+    @function_tool
+    async def calendar_list_events(
+        self,
+        time_min: Optional[str] = None,
+        time_max: Optional[str] = None,
+        max_results: int = 10,
+    ) -> str:
+        """List upcoming events on the user's primary Google Calendar, optionally
+        bounded by a time range. Use this to check the user's schedule or find an
+        event before modifying it -- always call this before telling the user
+        whether they have any meetings, rather than guessing.
+
+        Args:
+            time_min: RFC3339 timestamp (e.g. '2024-06-01T00:00:00Z'). Defaults to now if omitted.
+            time_max: RFC3339 timestamp. Omit for no upper bound.
+            max_results: Maximum number of events to return (1-50). Default is 10.
+        """
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "calendar_list_events",
+            {"time_min": time_min, "time_max": time_max, "max_results": max_results},
+            self._supabase,
+            self._user_id,
+        )
+
+    @function_tool
+    async def calendar_create_event(
+        self,
+        summary: str,
+        start_time: str,
+        end_time: str,
+        description: Optional[str] = None,
+        attendees: Optional[List[str]] = None,
+        timezone: str = "UTC",
+    ) -> str:
+        """Create a new event on the user's primary Google Calendar, optionally
+        inviting attendees. Use this when the user asks you to schedule a
+        meeting or add something to their calendar.
+
+        Args:
+            summary: Event title.
+            start_time: RFC3339 start timestamp, e.g. '2024-06-01T15:00:00-07:00'.
+            end_time: RFC3339 end timestamp, e.g. '2024-06-01T16:00:00-07:00'.
+            description: Optional event description/notes.
+            attendees: Optional list of attendee email addresses to invite.
+            timezone: IANA timezone name for start/end, e.g. 'America/Los_Angeles'. Default is 'UTC'.
+        """
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "calendar_create_event",
+            {
+                "summary": summary,
+                "start_time": start_time,
+                "end_time": end_time,
+                "description": description,
+                "attendees": attendees,
+                "timezone": timezone,
+            },
+            self._supabase,
+            self._user_id,
+        )
+
+    @function_tool
+    async def drive_search_docs(self, query: str, max_results: int = 10) -> str:
+        """Search the user's Google Drive for files by name. Read-only -- use
+        this to find a file's id before referencing it elsewhere; it does not
+        return file content.
+
+        Args:
+            query: Text to search for in file names, e.g. 'Q3 budget'.
+            max_results: Maximum number of files to return (1-50). Default is 10.
+        """
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "drive_search_docs", {"query": query, "max_results": max_results}, self._supabase, self._user_id
+        )
+
+    @function_tool
+    async def drive_create_doc(self, title: str, content: Optional[str] = None) -> str:
+        """Create a new Google Doc in the user's Drive, optionally pre-filled
+        with plain-text content. Use this when the user asks you to draft a
+        document, notes, or a report as a Google Doc.
+
+        Args:
+            title: Title of the new Google Doc.
+            content: Optional plain-text content to populate the document with.
+        """
+        return self._google_workspace_unavailable() or await execute_google_workspace_tool(
+            "drive_create_doc", {"title": title, "content": content}, self._supabase, self._user_id
+        )
