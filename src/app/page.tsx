@@ -1303,12 +1303,16 @@ export default function Dashboard() {
           className="flex-1 bg-transparent resize-none focus:outline-none border-none py-2 px-3 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 max-h-48 custom-scrollbar min-h-[36px] disabled:opacity-50"
         />
 
+        {/* Right-side controls group (model selector, mic, send) -- one flex
+            row with items-center so all three share the same vertical
+            center line regardless of their individual padding/heights. */}
+        <div className="flex items-center gap-2 flex-shrink-0 self-end mb-0.5">
         {/* Model Selector Dropdown - Re-located inside input container, on the right side */}
-        <div className="relative flex-shrink-0 self-end mb-0.5">
+        <div className="relative flex-shrink-0">
           <button
             type="button"
             onClick={() => setProviderDropdownOpen(!providerDropdownOpen)}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
+            className={`flex items-center justify-center gap-2 h-9 px-3 rounded-xl border text-xs font-semibold shadow-sm transition-all cursor-pointer ${activeProvider.color}`}
           >
             <ActiveProviderIcon className="w-4 h-4" />
             <span className="hidden sm:inline">{activeProvider.name}</span>
@@ -1360,7 +1364,7 @@ export default function Dashboard() {
           type="button"
           onClick={handleVoiceButtonClick}
           title="Voice Mode"
-          className="p-2.5 rounded-xl text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors cursor-pointer flex-shrink-0 self-end mb-0.5"
+          className="flex items-center justify-center h-9 w-9 rounded-xl text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors cursor-pointer flex-shrink-0"
         >
           <Mic className="w-5 h-5 drop-shadow-[0_0_8px_rgba(147,51,234,0.7)] animate-pulse" />
         </button>
@@ -1368,10 +1372,11 @@ export default function Dashboard() {
         <button
           type="submit"
           disabled={(!inputText.trim() && !attachedFile) || isStreaming}
-          className="p-2.5 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
+          className="flex items-center justify-center h-9 w-9 bg-gradient-to-r from-violet-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 disabled:from-slate-200 dark:disabled:from-slate-800 disabled:to-slate-200 dark:disabled:to-slate-800 text-white dark:disabled:text-slate-500 rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed disabled:shadow-none flex-shrink-0"
         >
           <Send className="w-4 h-4" />
         </button>
+        </div>
       </div>
     </form>
   )
