@@ -57,6 +57,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AetherChat API Portal", lifespan=lifespan)
 
+
+@app.get("/", tags=["health"])
+async def health():
+    return {"status": "ok", "service": "AetherChat API"}
+
+
+@app.get("/api/health", tags=["health"])
+async def api_health():
+    return {"status": "ok", "service": "AetherChat API"}
+
+
 # Restrict CORS to production domains
 app.add_middleware(
     CORSMiddleware,
