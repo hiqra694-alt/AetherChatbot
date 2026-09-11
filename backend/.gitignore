@@ -47,3 +47,4 @@ reference/*.png
 # Debug / scratch test scripts
 test_search.py
 test_search_urls.py
+test_cors.py

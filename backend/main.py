@@ -71,7 +71,10 @@ async def api_health():
 # Restrict CORS to production domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://aether-chatbot-ng9i.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
