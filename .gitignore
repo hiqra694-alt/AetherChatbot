@@ -32,6 +32,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Agent / IDE tooling
+.claude/
+
 # Python (in case any scripts/tooling are ever run from repo root)
 __pycache__/
 *.pyc
