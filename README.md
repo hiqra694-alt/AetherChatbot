@@ -175,7 +175,7 @@ pip install -r requirements-worker.txt
 python -m voice.agent dev
 ```
 
-Needs `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY` in backend/.env, and `NEXT_PUBLIC_LIVEKIT_URL` in .env.local — the browser connects to the LiveKit room directly, so the frontend needs the URL too. Without it the app runs normally and only voice mode reports it as missing.
+Needs `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY` in `backend/.env`, and `NEXT_PUBLIC_LIVEKIT_URL` in `.env.local` — the browser connects to the LiveKit room directly, so the frontend needs the URL too. Without it the app runs normally and only voice mode reports it as missing.
 
 
 ## API reference
@@ -223,7 +223,7 @@ cd backend && pytest
 
 **Cold starts.** The API runs on Render's free tier, which sleeps the service after roughly 15 minutes of inactivity; waking takes about 50 seconds. Backend calls are proxied through `next.config.ts` rewrites rather than Vercel Edge Middleware, whose 25-second ceiling is shorter than a cold start.
 
-**Process separation.** The voice agent never runs in the API process. The API carries only livekit-api, which it uses to mint room tokens at POST /api/voice/token. The agent itself deploys to LiveKit Cloud from backend/Dockerfile and installs requirements-worker.txt, which layers livekit-agents and its Deepgram and Cartesia plugins on top of requirements.txt, so the STT/TTS stack never ships with the API.
+**Process separation.** The voice agent never runs in the API process. The API carries only `livekit-api`, which it uses to mint room tokens at `POST /api/voice/token`. The agent itself deploys to LiveKit Cloud from `backend/Dockerfile` and installs `requirements-worker.txt`, which layers `livekit-agents` and its Deepgram and Cartesia plugins on top of `requirements.txt`, so the STT/TTS stack never ships with the API.
 
 **Graceful shutdown.** The task scheduler runs as an `asyncio.Task` started in the lifespan handler and stopped via an `asyncio.Event` rather than `task.cancel()`, so a poll mid-flight at shutdown finishes its database call instead of being severed.
 

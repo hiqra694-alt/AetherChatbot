@@ -72,7 +72,7 @@ async def api_health():
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://aether-chatbot-ng9i.vercel.app",
+        "https://aether-agentic-workspace.vercel.app",
         "http://localhost:3000",
     ],
     allow_credentials=False,
