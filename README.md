@@ -1,6 +1,6 @@
 # Aether-Agentic-Workspace
 
-An AI assistant with hybrid-retrieval RAG, live voice, a collaborative document canvas, and Google Workspace tool use — built on a provider-agnostic backend that swaps between OpenAI, Anthropic, Gemini and Groq without touching application code.
+An AI assistant with hybrid-retrieval RAG, live voice, a collaborative document canvas, and Google Workspace tool use, built on a provider-agnostic backend that swaps between OpenAI, Anthropic, Gemini and Groq without touching application code.
 
 ---
 
@@ -161,7 +161,7 @@ Everything else is optional. Google connectors, Drive export, the voice agent an
 ```bash
 npm install
 cp .env.local.example .env.local
-# NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, NEXT_PUBLIC_BACKEND_URL
+# NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, NEXT_PUBLIC_BACKEND_URL, NEXT_PUBLIC_LIVEKIT_URL
 npm run dev
 ```
 
@@ -175,7 +175,8 @@ pip install -r requirements-worker.txt
 python -m voice.agent dev
 ```
 
-Needs `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`.
+Needs `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY` in backend/.env, and `NEXT_PUBLIC_LIVEKIT_URL` in .env.local — the browser connects to the LiveKit room directly, so the frontend needs the URL too. Without it the app runs normally and only voice mode reports it as missing.
+
 
 ## API reference
 
@@ -188,12 +189,12 @@ Routes are prefixed `/api` except the root health check. Interactive docs at `/d
 | `POST` | `/chat` | Streaming chat with the tool-use loop |
 | `POST` | `/documents/upload` | Ingest a PDF: parse, chunk, embed, store |
 | `GET` | `/documents` | List the user's documents |
-| `DELETE` | `/documents/{name}` | Delete a document and its chunks |
+| `DELETE` | `/documents/{document_name}` | Delete a document and its chunks |
 | `GET` | `/memory` | Read the user's memory profile |
 | `DELETE` | `/memory` | Clear it |
 | `GET` | `/tasks` | List tasks (`?status=`, `?due_only=`) |
-| `PATCH` | `/tasks/{id}/complete` | Mark complete |
-| `DELETE` | `/tasks/{id}` | Delete |
+| `PATCH` | `/tasks/{task_id}/complete` | Mark complete |
+| `DELETE` | `/tasks/{task_id}` | Delete |
 | `GET` | `/connectors/status` | Which providers are connected |
 | `POST` | `/connectors/store-token` | Persist an OAuth token |
 | `DELETE` | `/connectors/disconnect` | Revoke a provider |
