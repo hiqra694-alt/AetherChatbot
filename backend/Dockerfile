@@ -1,6 +1,6 @@
 # Voice agent worker (LiveKit Cloud deployment target). Builds and runs
 # voice/agent.py standalone -- never main.py/FastAPI, which deploys
-# separately to Vercel (see vercel.json). Build context must be this
+# separately to Render. Build context must be this
 # directory (backend/): voice/agent.py's imports are all absolute from this
 # package root (e.g. `from core.config import get_settings`), so it must
 # also be WORKDIR/CMD's cwd here.
